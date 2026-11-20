@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const installer = path.join(repo, "scripts/install-headless.sh");
 const sourceCollector = path.join(repo, "mods/insights/collector.mjs");
+const sourceIndexer = path.join(repo, "mods/insights/indexer.mjs");
 const coreDir = path.join(repo, "mods/insights/core");
 const SERVICE = "herdr-insights-collect.service";
 const TIMER = "herdr-insights-collect.timer";
@@ -160,6 +161,7 @@ function installedFiles(sb) {
   const units = path.join(sb.xdg, "systemd/user");
   return [
     path.join(share, "collector.mjs"),
+    path.join(share, "indexer.mjs"),
     ...coreNames().map((name) => path.join(share, "core", name)),
     path.join(units, SERVICE),
     path.join(units, TIMER),
@@ -206,6 +208,9 @@ test("--install copies the collector and core modules and writes both units", (t
   const installedCollector = path.join(share, "collector.mjs");
   assert.equal(readFileSync(installedCollector, "utf8"), readFileSync(sourceCollector, "utf8"));
   assert.equal(statSync(installedCollector).mode & 0o777, 0o755);
+  const installedIndexer = path.join(share, "indexer.mjs");
+  assert.equal(readFileSync(installedIndexer, "utf8"), readFileSync(sourceIndexer, "utf8"));
+  assert.equal(statSync(installedIndexer).mode & 0o777, 0o644);
   for (const name of coreNames()) {
     const target = path.join(share, "core", name);
     assert.equal(readFileSync(target, "utf8"), readFileSync(path.join(coreDir, name), "utf8"));
@@ -225,6 +230,7 @@ test("--install copies the collector and core modules and writes both units", (t
   const store = path.join(sb.xdg, "herdr-app/data/insights/insights.json");
   const service = readFileSync(servicePath, "utf8");
   assert.match(service, /^Type=oneshot$/m);
+  assert.match(service, /^KillMode=process$/m, "the detached indexer survives the pass");
   assert.match(service, /^UMask=0077$/m);
   const timeout = Number(service.match(/^TimeoutStartSec=(\d+)$/m)?.[1]);
   assert.ok(timeout > 0 && timeout <= 3600, "the service timeout is bounded");
@@ -249,6 +255,34 @@ test("--install copies the collector and core modules and writes both units", (t
     "verification substitutes the not-yet-installed collector",
   );
   assert.doesNotMatch(verified, /@COLLECTOR@/);
+});
+
+test("a fresh store reads oh-my-pi sessions only on a host that has them", (t) => {
+  const storeSources = (sb) => {
+    const store = path.join(sb.xdg, "herdr-app/data/insights/insights.json");
+    return JSON.parse(readFileSync(store, "utf8")).config.sources;
+  };
+
+  const withOmp = sandbox(t);
+  symlinkSync(process.execPath, path.join(withOmp.bin, "node"));
+  mkdirSync(path.join(withOmp.home, ".omp/agent/sessions"), { recursive: true });
+  const installed = run(withOmp, ["--install"]);
+  assert.equal(installed.status, 0, installed.stderr + installed.stdout);
+  const sources = storeSources(withOmp);
+  assert.deepEqual(sources.find((source) => source.id === "omp"), {
+    id: "omp",
+    label: "oh-my-pi",
+    adapter: "pi",
+    enabled: true,
+    roots: ["~/.omp/agent/sessions"],
+  });
+  assert.ok(sources.some((source) => source.id === "opencode"), "the defaults are kept");
+
+  const withoutOmp = sandbox(t);
+  symlinkSync(process.execPath, path.join(withoutOmp.bin, "node"));
+  const plain = run(withoutOmp, ["--install"]);
+  assert.equal(plain.status, 0, plain.stderr + plain.stdout);
+  assert.equal(storeSources(withoutOmp).some((source) => source.id === "omp"), false);
 });
 
 test("the timer is enabled only with --enable", (t) => {

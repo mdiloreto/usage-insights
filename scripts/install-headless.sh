@@ -11,6 +11,9 @@ umask 022
 src=$(cd "$(dirname "$0")/.." && pwd)
 mods=$src/mods/insights
 collector=$mods/collector.mjs
+# The collector hands a source too large for one pass (a multi-GB opencode.db)
+# to indexer.mjs as a detached process; without it that source never finishes.
+indexer=$mods/indexer.mjs
 share=$HOME/.local/share/herdr-insights
 unitdir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 apphome=${XDG_CONFIG_HOME:-$HOME/.config}/herdr-app
@@ -26,7 +29,7 @@ usage='usage: install-headless.sh [--check | --install [--enable]]
   (no flags)  read-only report: what was found, what would be installed,
               and which prerequisites are missing; changes nothing
   --check     same as no flags
-  --install   copy collector.mjs and core/*.mjs to $HOME/.local/share/herdr-insights
+  --install   copy collector.mjs, indexer.mjs and core/*.mjs to $HOME/.local/share/herdr-insights
               and write the user units for $HOME
   --enable    with --install, run systemctl --user daemon-reload and then
               enable --now the timer
@@ -57,7 +60,7 @@ if [ "$do_enable" -eq 1 ] && [ "$do_install" -eq 0 ]; then
   exit 2
 fi
 
-for f in "$collector" "$mods"/core/*.mjs; do
+for f in "$collector" "$indexer" "$mods"/core/*.mjs; do
   [ -f "$f" ] || { printf 'missing source: %s\n' "$f" >&2; exit 2; }
 done
 
@@ -82,6 +85,9 @@ Description=herdr-insights headless collector
 
 [Service]
 Type=oneshot
+# The detached indexer outlives the pass that started it; the default
+# control-group mode would kill it when the collector exits.
+KillMode=process
 WorkingDirectory=%h
 UMask=0077
 TimeoutStartSec=$timeout
@@ -105,10 +111,24 @@ EOF
 # age against. A headless host collects every $REFRESH_MINUTES minutes, so the
 # store must say the same, or every remote reads as stale. Written once, on a
 # fresh store only: an existing store keeps the person's own configuration.
+#
+# oh-my-pi writes Pi-format sessions under its own root, which no default source
+# covers, so a host that has it gets one more source read by the Pi adapter.
 configure_store() {
   [ -e "$store" ] && return 0
+  config="{\"refreshSeconds\":$REFRESH_SECONDS}"
+  if [ -d "$HOME/.omp/agent/sessions" ]; then
+    config=$("$node_bin" --input-type=module -e '
+      const { pathToFileURL } = await import("node:url");
+      const { DEFAULT_CONFIG } = await import(pathToFileURL(process.argv[1]).href);
+      const sources = DEFAULT_CONFIG.sources.map((source) => ({ ...source, roots: [...source.roots] }));
+      sources.push({ id: "omp", label: "oh-my-pi", adapter: "pi", enabled: true, roots: ["~/.omp/agent/sessions"] });
+      process.stdout.write(JSON.stringify({ refreshSeconds: Number(process.argv[2]), sources }));
+    ' "$share/core/config.mjs" "$REFRESH_SECONDS" 2>/dev/null) \
+      || config="{\"refreshSeconds\":$REFRESH_SECONDS}"
+  fi
   "$node_bin" "$share/collector.mjs" configure --store "$store" --home "$HOME" \
-    --config "{\"refreshSeconds\":$REFRESH_SECONDS}" >/dev/null 2>&1 \
+    --config "$config" >/dev/null 2>&1 \
     || printf 'note: the store could not be configured; set refreshSeconds to %s\n' "$REFRESH_SECONDS" >&2
 }
 
@@ -190,6 +210,7 @@ for rel in \
   .codex/archived_sessions \
   .local/share/opencode \
   .pi/agent/sessions \
+  .omp/agent/sessions \
   .gemini/antigravity-cli
 do
   if [ -d "$HOME/$rel" ]; then
@@ -205,6 +226,7 @@ check_managed_dir "$share/core"
 check_managed_dir "$unitdir"
 
 preflight "$collector" "$share/collector.mjs" 0755
+preflight "$indexer" "$share/indexer.mjs" 0644
 for f in "$mods"/core/*.mjs; do
   name=${f##*/}
   preflight "$f" "$share/core/$name" 0644
@@ -240,6 +262,7 @@ if [ "$do_install" -eq 1 ]; then
   else
     mkdir -p "$share/core" "$unitdir"
     install_one "$collector" "$share/collector.mjs" 0755
+    install_one "$indexer" "$share/indexer.mjs" 0644
     for f in "$mods"/core/*.mjs; do
       name=${f##*/}
       install_one "$f" "$share/core/$name" 0644
@@ -270,7 +293,7 @@ printf '  systemctl --user daemon-reload\n'
 printf '  systemctl --user enable --now %s\n' "$tim"
 printf 'to uninstall:\n'
 printf '  systemctl --user disable --now %s\n' "$tim"
-printf '  rm -f %s\n' "$share/collector.mjs"
+printf '  rm -f %s %s\n' "$share/collector.mjs" "$share/indexer.mjs"
 printf '  rm -f %s/core/*.mjs\n' "$share"
 printf '  rm -f %s %s\n' "$unitdir/$svc" "$unitdir/$tim"
 printf '  systemctl --user daemon-reload\n'
