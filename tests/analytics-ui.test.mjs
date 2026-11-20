@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 const mainSource = await readFile(new URL("../mods/insights/main.js", import.meta.url), "utf8");
 const analyticsSource = await readFile(new URL("../mods/insights/analytics.js", import.meta.url), "utf8");
 const uiSource = await readFile(new URL("../mods/insights/ui.js", import.meta.url), "utf8");
+const fleetSource = await readFile(new URL("../mods/insights/core/fleet.mjs", import.meta.url), "utf8");
 const dataUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 const analyticsUrl = dataUrl(analyticsSource);
 const analytics = await import(analyticsUrl);
@@ -103,6 +104,9 @@ const Popover = {
 const uiUrl = dataUrl(transformedUi);
 const ui = await import(uiUrl);
 const uiNames = Object.keys(ui).join(", ");
+const fleetUrl = dataUrl(fleetSource);
+const fleet = await import(fleetUrl);
+const fleetNames = Object.keys(fleet).join(", ");
 
 const transformedMain = mainSource
   .replace(/^import \{ View, div, svg \} from "gpui-kit";$/m, `const View = class View {};
@@ -147,11 +151,16 @@ const notify = (...args) => globalThis.__insightsTestHerdr.notify(...args);
 const panes = () => globalThis.__insightsTestHerdr.panes();
 const props = () => globalThis.__insightsTestHerdr.props();
 const run = (...args) => globalThis.__insightsTestHerdr.run(...args);
-const spaces = () => globalThis.__insightsTestHerdr.spaces();`,
+const spaces = () => globalThis.__insightsTestHerdr.spaces();
+const machines = () => globalThis.__insightsTestHerdr?.machines?.() ?? [];`,
   )
   .replace(
     /^import \{[\s\S]*?\} from "\.\/analytics\.js";$/m,
     `const { ${analyticsNames} } = await import("${analyticsUrl}");`,
+  )
+  .replace(
+    /^import \{[\s\S]*?\} from "\.\/core\/fleet\.mjs";$/m,
+    `const { ${fleetNames} } = await import("${fleetUrl}");`,
   )
   .replace(
     /^import \{[\s\S]*?\} from "\.\/ui\.js";$/m,
@@ -183,7 +192,7 @@ function presentationFor(snapshot, options, command = "snapshot") {
 
 function useHerdr({ readTextFile, execResult } = {}) {
   const state = {
-    commands: [], execCalls: [], panes: [], props: {}, runtimeReads: [], spaces: [],
+    commands: [], execCalls: [], panes: [], props: {}, runtimeReads: [], spaces: [], machines: [],
     exportFolder: "/exports", exportWrites: [], notifications: [],
   };
   state.herdr = {
@@ -194,6 +203,7 @@ function useHerdr({ readTextFile, execResult } = {}) {
     nextCommand: () => new Promise(() => {}),
     panes: () => state.panes,
     props: () => state.props,
+    machines: () => state.machines,
     run: (...args) => state.commands.push(args),
     spaces: () => state.spaces,
     readTextFile: async (path) => {
@@ -357,10 +367,13 @@ test("native mod keeps timers and shell use inside the Herdr contract", () => {
   assert.doesNotMatch(mainSource, /--rebuild/);
   assert.match(mainSource, /readTextFile\(this\.runtimePath\(\)\)/);
   assert.match(mainSource, /mods\/insights\/runtime\.json/);
-  assert.equal((mainSource.match(/this\.execNode\(\[/g) ?? []).length, 3);
+  assert.equal((mainSource.match(/this\.execNode\(\[/g) ?? []).length, 4);
   assert.equal((mainSource.match(/\bexec\((?:node|DEFAULT_NODE), args, options\)/g) ?? []).length, 2);
   assert.match(mainSource, /presenter\.mjs/);
   assert.match(mainSource, /"prepare"/);
+  // The fleet is read through the same helper and the same Node binary.
+  assert.match(mainSource, /"fleet"/);
+  assert.match(mainSource, /readFleetMachine/);
   assert.match(mainSource, /timer\.after\(0/);
   assert.match(mainSource, /configure/);
   assert.match(mainSource, /--config/);
@@ -666,6 +679,8 @@ test("refresh and configure share one single-flight guard", () => {
   instance.refresh(cx);
   assert.equal(instance.loading, true);
   assert.equal(instance.busy(), true);
+  // One task for the local snapshot. The fleet read is a task of its own, and
+  // it only starts when another machine is actually connected.
   assert.equal(cx.calls.spawn, 1);
   assert.equal(cx.calls.notify, 1);
 
@@ -703,6 +718,42 @@ test("dashboard render uses the precomputed presentation and builds closed filte
   assert.doesNotMatch(mainSource, /const (source|provider|model|project)Options = buildFacetOptions/);
   assert.doesNotMatch(mainSource, /safeAvatarPath|AvatarImage|AvatarFallback|Profile/);
   assert.match(mainSource, /scheduleDashboard\(clickCx, \{ force: true \}\)/);
+});
+
+test("the fleet card lists each machine, its total, and why a machine could not be read", () => {
+  const instance = blankInstance();
+  instance.fleet = {
+    kind: "insights-fleet",
+    range: "all time",
+    machines: [{
+      label: "studio",
+      totals: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 15, messages: 1 },
+      ageMs: 60_000,
+      stale: false,
+    }],
+    fleet: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 15, messages: 1 },
+    skipped: [{ label: "office", reason: "could not reach that machine" }],
+  };
+
+  const text = [];
+  const walk = (node) => {
+    if (typeof node === "string") { text.push(node); return; }
+    for (const child of node?.childNodes ?? []) walk(child);
+  };
+  walk(instance.fleetCard({ text: "#eee", dim: "#888" }));
+  const rendered = text.join(" ");
+
+  assert.match(rendered, /studio/, "the machine that was read is named");
+  assert.match(rendered, /15/, "its own total is shown");
+  assert.match(rendered, /could not reach that machine/, "a machine that could not be read keeps its reason");
+  assert.match(rendered, /not counted/, "and is never presented as a machine that used nothing");
+});
+
+test("with no fleet reading the dashboard shows no fleet card", () => {
+  const instance = blankInstance();
+  assert.equal(instance.fleetCard({ text: "#eee", dim: "#888" }), null);
+  instance.fleet = { kind: "insights-fleet", range: "all time", machines: [], fleet: null, skipped: [] };
+  assert.equal(instance.fleetCard({ text: "#eee", dim: "#888" }), null);
 });
 
 test("heatmap month labels keep their spans while partial labels cannot wrap", () => {

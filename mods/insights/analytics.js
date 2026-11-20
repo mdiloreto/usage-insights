@@ -527,6 +527,11 @@ export function filterRowsByRange(rows, range) {
   return (rows ?? []).filter((row) => rangeContains(row?.day, range));
 }
 
+/** Rows for the dashboard's selected facets and period, in either order. */
+export function filterRowsForPeriod(rows, filters, range) {
+  return filterRowsByRange(filterRows(rows, filters), range);
+}
+
 export function activityDays(rows, includeCache = true) {
   const days = new Set();
   for (const row of rows ?? []) {

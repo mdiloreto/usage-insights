@@ -14,6 +14,7 @@ import {
   deriveDashboard,
 } from "./analytics.js";
 import { collectSnapshot, readCommittedSnapshot } from "./collector.mjs";
+import { fleetView } from "./core/fleet-view.mjs";
 
 function usage() {
   return [
@@ -22,6 +23,7 @@ function usage() {
     "  presenter.mjs configure --store <file> --home <dir> --config <json> [--options <json>]",
     "  presenter.mjs prepare --store <file> [--options <json>]",
     "  presenter.mjs status --store <file> [--options <json>]",
+    "  presenter.mjs fleet --options <json>",
   ].join("\n");
 }
 
@@ -123,8 +125,18 @@ export async function run(argv, environment = {}) {
   if (options.help || !command) {
     return { exitCode: 0, stdout: "", stderr: `${usage()}\n` };
   }
-  if (!["snapshot", "configure", "prepare", "status"].includes(command)) {
+  if (!["snapshot", "configure", "prepare", "status", "fleet"].includes(command)) {
     return { exitCode: 2, stdout: "", stderr: `unknown command ${command}\n${usage()}\n` };
+  }
+  if (command === "fleet") {
+    // The fleet arrives in the options: the UI fetched the remote caches and
+    // hands them over, and this helper does the aggregation.
+    const dashboardOptions = parseOptions(options.options);
+    if (!dashboardOptions.fleet || typeof dashboardOptions.fleet !== "object") {
+      return { exitCode: 2, stdout: "", stderr: "--options must carry the fleet payload\n" };
+    }
+    const view = fleetView(dashboardOptions.fleet, dashboardOptions);
+    return { exitCode: 0, stdout: `${JSON.stringify(view)}\n`, stderr: "" };
   }
   if (!options.store) {
     return { exitCode: 2, stdout: "", stderr: "--store is required\n" };
