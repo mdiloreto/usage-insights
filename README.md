@@ -37,12 +37,69 @@ click-state rules. Set `HERDR_APP_HOME` to use a different app home.
 - Open **Settings** to choose sources, edit paths, toggle cached tokens, or
   change the palette and refresh interval.
 
+## Fleet
+
+The dashboard also shows what the **other machines** connected to Herdr used. A
+**Fleet usage** card sits above the local sections: one row per machine with
+the tokens it used in the selected period, the fleet total, and how fresh that
+machine's data is.
+
+```
+Fleet usage        All time · 1.56B tokens across 1 machine
+192.168.88.251     1m old                              1.56B
+```
+
+The numbers obey the same period, the same facets and the same
+"include cached tokens" rule as this computer's, because they come out of the
+same analytics.
+
+### How a machine is measured
+
+The collector runs **on the machine that owns the sessions**: it reads local
+session files, so it has to be local. Each measured host therefore runs the
+collector itself, and the viewer only reads what that host collected.
+
+- A machine that runs Herdr already has the collector: the mod installs it and
+  keeps it fresh.
+- A measured host **without** Herdr (an Omarchy box, a server) installs the
+  collector and a timer:
+
+  ```sh
+  git clone https://github.com/mdiloreto/usage-insights.git
+  cd usage-insights
+  bash scripts/install-headless.sh --install --enable
+  ```
+
+  It installs the collector under `~/.local/share/herdr-insights`, writes a
+  user timer that collects every five minutes, and stores the result in
+  `<app home>/data/insights/insights.json`. `--check` reports what it would do
+  and changes nothing.
+
+The viewer reads the **presentation cache** beside the store (a small file, a
+few tens of kilobytes) over the same `exec` the mod already uses. The machine
+name only ever travels as Herdr's `on` option, so it never reaches a shell.
+Nothing is written to another machine, no code is pushed onto it, and no
+filesystem is shared.
+
+### When a machine cannot be read
+
+A machine that cannot be reached keeps its own reason — *could not reach that
+machine*, *no cache on that machine*, *cache unreadable*, *cache is not valid
+JSON*, *cache is not an insights cache* — and is **never** counted as a
+machine that used nothing. It is listed with the reason and left out of the
+fleet total. A machine whose data is older than its own refresh interval is
+marked stale.
+
 ## Privacy
 
 No network requests or uploads. The mod runs a local Node helper, reads session
 files and OpenCode/Antigravity SQLite databases, and writes usage metadata to
 `~/.config/herdr-app/data/insights/insights.json`. It does not store prompt or
 response text or modify source transcripts.
+
+Reading another machine's usage cache is a local file read over Herdr's own
+connection: nothing leaves the fleet, and the helper still never uploads
+anything.
 
 ## Development
 
@@ -73,6 +130,13 @@ ownership name stays `herdr-insights`, so an existing install upgrades in place.
 
 Changes from upstream:
 
+- The dashboard reads the usage cache of every other machine connected to Herdr
+  and shows a **Fleet usage** card: each machine's tokens for the selected
+  period, the fleet total, and how fresh that machine's data is. A machine that
+  cannot be read keeps its own reason and is never counted as a machine that
+  used nothing. `scripts/install-headless.sh` installs the collector and a
+  timer on a measured host that has no Herdr app, so every machine collects its
+  own sessions where they live.
 - Toggling, re-rooting or remapping a source keeps collected history; only the
   files a change invalidates are dropped, and disabled sources are hidden.
 - A corrupt store is replaced without losing settings; a store written by a
