@@ -1,7 +1,7 @@
 // Insights: a native, local-only usage dashboard. No DOM, no shell, no stored cx.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Button, Input, InputState, Editor, EditorState, Popover } from "gpui-base";
-import { exec, appHome, home, theme, settings, nextCommand, panes, props, run, readTextFile, writeTextFile, pickFolder, notify, spaces } from "herdr";
+import { exec, appHome, home, machines, theme, settings, nextCommand, panes, props, run, readTextFile, writeTextFile, pickFolder, notify, spaces } from "herdr";
 import {
   PALETTES,
   clampRefreshSeconds,
@@ -24,6 +24,7 @@ import {
   todayKey,
   weekdayLabels,
 } from "./analytics.js";
+import { fleetMachines, readFleetMachine } from "./core/fleet.mjs";
 import {
   G,
   H,
@@ -209,6 +210,10 @@ const PRESENTER_FILE = "mods/insights/presenter.mjs";
 // backstop a little past it.
 const PREPARE_TIMEOUT_MS = 30_000;
 const REFRESH_TIMEOUT_MS = 45_000;
+// A fleet read is one small file over the wire; a machine that is slow to
+// answer must not eat the whole refresh budget, and it never blocks the local
+// dashboard, which runs beside it.
+const FLEET_TIMEOUT_MS = 20_000;
 const SAVE_TIMEOUT_MS = 60_000;
 const WATCHDOG_GRACE_MS = 5_000;
 
@@ -288,6 +293,21 @@ function parseRuntimeNode(raw) {
     throw new Error("runtime.json node must be a Node executable path, not a URL.");
   }
   return node;
+}
+
+function parseFleetView(stdout) {
+  const text = String(stdout ?? "").trim();
+  if (!text) throw new Error("The presentation helper returned no fleet view.");
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("The presentation helper returned invalid fleet JSON.");
+  }
+  if (!parsed || typeof parsed !== "object" || parsed.kind !== "insights-fleet") {
+    throw new Error("The presentation helper returned an unexpected fleet payload.");
+  }
+  return parsed;
 }
 
 function parseSnapshot(stdout) {
@@ -554,6 +574,8 @@ export default class Insights extends View {
     this.refreshWatchdog = null;
     this.saveWatchdog = null;
     this.years = [Number(todayKey().slice(0, 4))];
+    this.fleet = null;
+    this.fleetTask = null;
 
     this.resolveRuntime(cx);
     this.commandTask = cx.spawn(async (commandCx) => {
@@ -1112,8 +1134,71 @@ export default class Insights extends View {
     this.dashboardTask = task;
   }
 
+  /**
+   * Read the usage cache of every other machine Herdr knows, then let the
+   * Node helper do the aggregation: the UI fetches, Node computes, the UI
+   * renders the compact result.
+   *
+   * Each read stands alone: a machine that cannot be reached keeps its own
+   * reason and is never counted as a machine that used nothing. The read runs
+   * beside the local refresh, so a slow or missing machine never holds up this
+   * computer's dashboard.
+   */
+  readFleet(cx) {
+    if (this.closed || this.fleetTask) return;
+    const remote = fleetMachines(machines()).filter((machine) => machine.name !== null);
+    if (remote.length === 0) {
+      // No other machine: drop a fleet card that is no longer true, but do not
+      // wake the view for a fleet that was never there.
+      if (this.fleet) {
+        this.fleet = null;
+        cx.notify();
+      }
+      return;
+    }
+    this.fleetTask = cx.spawn(async (fleetCx) => {
+      const entries = [];
+      for (const machine of remote) {
+        entries.push(await readFleetMachine(machine, { exec, timeout: FLEET_TIMEOUT_MS }));
+      }
+      if (this.closed) return;
+      let view = null;
+      try {
+        const config = this.snapshot?.config ?? {};
+        const payload = {
+          includeCache: config.includeCache !== false,
+          weekStartsOn: config.weekStartsOn,
+          machines: entries.map((entry) => ({
+            label: entry.label,
+            ok: entry.ok,
+            reason: entry.reason,
+            rows: entry.rows,
+            savedAt: entry.savedAt,
+            refreshSeconds: entry.config?.refreshSeconds,
+          })),
+        };
+        const options = { ...this.dashboardOptions(), fleet: payload };
+        const result = await this.execNode([
+          this.presenterPath(),
+          "fleet",
+          "--options",
+          JSON.stringify(options),
+        ], { timeout: FLEET_TIMEOUT_MS });
+        if (result.code === 0) view = parseFleetView(result.stdout);
+      } catch {
+        // A fleet that cannot be computed leaves the local dashboard untouched.
+        view = null;
+      }
+      if (this.closed) return;
+      this.fleet = view;
+      this.fleetTask = null;
+      fleetCx.notify();
+    });
+  }
+
   refresh(cx) {
     if (this.closed || !this.runtimeReady) return;
+    this.readFleet(cx);
     if (this.runtimeError) {
       this.resolveRuntime(cx);
       return;
@@ -1688,6 +1773,47 @@ export default class Insights extends View {
     });
   }
 
+  /**
+   * The fleet: the same usage, read from every other machine Herdr knows.
+   *
+   * The numbers arrive computed from the Node helper, so they obey the same
+   * period, the same facets and the same includeCache rule as this computer's.
+   * A machine that could not be read keeps its own reason and is never shown
+   * as a machine that used nothing.
+   */
+  fleetCard(c) {
+    const fleet = this.fleet;
+    if (!fleet) return null;
+    const machines = Array.isArray(fleet.machines) ? fleet.machines : [];
+    const skipped = Array.isArray(fleet.skipped) ? fleet.skipped : [];
+    if (machines.length === 0 && skipped.length === 0) return null;
+    const total = fleet.fleet?.total ?? 0;
+    const subtitle = machines.length === 0
+      ? `${fleet.range} · no machine has shared usage yet`
+      : `${fleet.range} · ${formatCompact(total)} tokens across ${machines.length} machine${machines.length === 1 ? "" : "s"}`;
+    return card(c).gap(G.sm)
+      .child(cardHeader("Fleet usage", subtitle, c))
+      .children(machines.map((machine) => this.fleetRow(c, machine)))
+      .children(skipped.map((machine) => this.fleetRow(c, machine, true)));
+  }
+
+  fleetRow(c, machine, unreadable = false) {
+    const stale = Boolean(machine?.stale);
+    const age = Number.isFinite(machine?.ageMs) ? formatDuration(machine.ageMs) : null;
+    const note = unreadable
+      ? "not counted"
+      : stale
+        ? `stale${age ? ` · ${age} old` : ""}`
+        : age ? `${age} old` : null;
+    return h_flex().w_full().flex_wrap().gap(G.sm).items_center().justify_between()
+      .child(h_flex().gap(G.sm).items_center().min_w(0)
+        .child(div().text_size(T.body).font_medium().text_color(c.text).child(machine.label))
+        .when(Boolean(note), (el) => el.child(div().text_size(T.small).text_color(c.dim).child(note))))
+      .child(div().text_size(T.body).font_semibold()
+        .text_color(unreadable ? c.dim : c.text)
+        .child(unreadable ? machine.reason : formatCompact(machine.totals?.total ?? 0)));
+  }
+
   dashboardView(c) {
     const derived = this.dashboard;
     if (!derived) {
@@ -1713,6 +1839,7 @@ export default class Insights extends View {
 
     return v_flex().w_full().gap(G.lg)
       .child(this.metricStrip(c, lifetime, peak, streaks))
+      .child(this.fleetCard(c))
       .when(rowCount === 0, (el) => el.child(this.emptyNotice(c, config)))
       .child(this.sectionHeader("Token usage", c))
       .child(this.heatmapCard(c, config, heatmap, selectedDay, range))
