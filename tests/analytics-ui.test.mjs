@@ -16,7 +16,12 @@ function fakeNativeElement() {
   const node = { calls: [], childNodes: [], style: {} };
   let element;
   const methods = {
-    child(value) { node.childNodes.push(value); return element; },
+    child(value) {
+      // Herdr rejects a missing child instead of skipping it.
+      if (value === null || value === undefined) throw new Error("child(value) expects an element, a string, or an entity");
+      node.childNodes.push(value);
+      return element;
+    },
     children(values) { node.childNodes.push(...values); return element; },
     when(condition, branch) { if (condition) branch(element); return element; },
     w(value) { node.style.width = value; return element; },
@@ -754,6 +759,22 @@ test("with no fleet reading the dashboard shows no fleet card", () => {
   assert.equal(instance.fleetCard({ text: "#eee", dim: "#888" }), null);
   instance.fleet = { kind: "insights-fleet", range: "all time", machines: [], fleet: null, skipped: [] };
   assert.equal(instance.fleetCard({ text: "#eee", dim: "#888" }), null);
+});
+
+test("the dashboard renders before any fleet reading arrives", () => {
+  useHerdr();
+  const instance = blankInstance();
+  const snapshot = savedSnapshot();
+  const rows = [{
+    day: "2024-01-10", session: "s1", harness: "pi", provider: "openai", model: "gpt-test", project: "/repo/insights",
+    tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }, messages: 1, activeMs: 1000, longestTaskMs: 1000,
+  }];
+  instance.snapshot = { ...snapshot, rows, rowCount: rows.length };
+  instance.dashboard = compactDashboard(deriveDashboard({ ...snapshot, rows }, {
+    filters: instance.filters, period: "all", year: 2024, heatmapMode: "daily", selectedDay: "2024-01-10", today: "2024-01-10",
+  }));
+  instance.fleet = null;
+  assert.doesNotThrow(() => instance.dashboardView({ text: "#eee", dim: "#888" }));
 });
 
 test("heatmap month labels keep their spans while partial labels cannot wrap", () => {
