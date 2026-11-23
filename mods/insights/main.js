@@ -1836,10 +1836,11 @@ export default class Insights extends View {
       });
     }
     const { config, rowCount, range, lifetime, peak, streaks, heatmap, leaders, selectedDay, selectedTotals, selectedTop, years } = derived;
+    const fleetCard = this.fleetCard(c);
 
     return v_flex().w_full().gap(G.lg)
       .child(this.metricStrip(c, lifetime, peak, streaks))
-      .child(this.fleetCard(c))
+      .when(Boolean(fleetCard), (el) => el.child(fleetCard))
       .when(rowCount === 0, (el) => el.child(this.emptyNotice(c, config)))
       .child(this.sectionHeader("Token usage", c))
       .child(this.heatmapCard(c, config, heatmap, selectedDay, range))
