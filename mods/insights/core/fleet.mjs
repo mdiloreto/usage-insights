@@ -10,7 +10,7 @@
 // Keep in sync with CACHE_VERSION in ./cache.mjs. A different version is not an
 // Insights cache for this reader.
 const CACHE_VERSION = 2;
-const MAX_CACHE_BYTES = 8 * 1024 * 1024;
+export const MAX_CACHE_BYTES = 8 * 1024 * 1024;
 
 // The script exits 0 only when it printed a cache, so a distinct non-zero code
 // separates "nothing to read" from "the machine could not be reached".
@@ -21,8 +21,8 @@ export const UNREADABLE_EXIT_CODE = 4;
 const REASON_NO_CACHE = "no cache on that machine";
 const REASON_UNREADABLE = "cache unreadable";
 const REASON_INVALID_JSON = "cache is not valid JSON";
-const REASON_NOT_INSIGHTS = "cache is not an insights cache";
-const REASON_UNREACHABLE = "could not reach that machine";
+export const REASON_NOT_INSIGHTS = "cache is not an insights cache";
+export const REASON_UNREACHABLE = "could not reach that machine";
 
 // Only the three internal constants below are interpolated. No caller input is
 // ever placed in this string; all paths come from the target machine's env.
@@ -161,4 +161,3 @@ export async function readFleetMachine(machine, { exec, timeout } = {}) {
   if (code === UNREADABLE_EXIT_CODE) return failed(machine, REASON_UNREADABLE);
   return failed(machine, REASON_UNREACHABLE);
 }
-

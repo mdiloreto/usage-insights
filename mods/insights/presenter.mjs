@@ -24,6 +24,8 @@ function usage() {
     "  presenter.mjs prepare --store <file> [--options <json>]",
     "  presenter.mjs status --store <file> [--options <json>]",
     "  presenter.mjs fleet --options <json>",
+    "  presenter.mjs machine-dashboard --store <file> --options <json>",
+    "  Remote machine-dashboard reads use the Core found in the App's PATH, or its exact absolute/~/ Core override.",
   ].join("\n");
 }
 
@@ -125,7 +127,7 @@ export async function run(argv, environment = {}) {
   if (options.help || !command) {
     return { exitCode: 0, stdout: "", stderr: `${usage()}\n` };
   }
-  if (!["snapshot", "configure", "prepare", "status", "fleet"].includes(command)) {
+  if (!["snapshot", "configure", "prepare", "status", "fleet", "machine-dashboard"].includes(command)) {
     return { exitCode: 2, stdout: "", stderr: `unknown command ${command}\n${usage()}\n` };
   }
   if (command === "fleet") {
@@ -140,6 +142,15 @@ export async function run(argv, environment = {}) {
   }
   if (!options.store) {
     return { exitCode: 2, stdout: "", stderr: "--store is required\n" };
+  }
+  if (command === "machine-dashboard") {
+    const { machineDashboard, parseMachineOptions } = await import("./core/machine-dashboard.mjs");
+    const input = parseMachineOptions(options.options);
+    if (!input) {
+      return { exitCode: 2, stdout: "", stderr: "invalid machine-dashboard --options\n" };
+    }
+    const view = await machineDashboard(path.resolve(options.store), input, environment.machineExec);
+    return { exitCode: 0, stdout: `${JSON.stringify(view)}\n`, stderr: "" };
   }
   if (command === "configure" && options.config === undefined) {
     return { exitCode: 2, stdout: "", stderr: "--config is required\n" };

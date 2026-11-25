@@ -1,7 +1,7 @@
-// Insights: a native, local-only usage dashboard. No DOM, no shell, no stored cx.
+// Insights: a native usage dashboard. No DOM, no shell, no stored cx.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Button, Input, InputState, Editor, EditorState, Popover } from "gpui-base";
-import { exec, appHome, home, machines, theme, settings, nextCommand, panes, props, run, readTextFile, writeTextFile, pickFolder, notify, spaces } from "herdr";
+import { exec, appHome, checking, home, machines, theme, settings, nextCommand, panes, props, run, readTextFile, writeTextFile, pickFolder, notify, spaces, shared, setShared } from "herdr";
 import {
   PALETTES,
   clampRefreshSeconds,
@@ -24,7 +24,11 @@ import {
   todayKey,
   weekdayLabels,
 } from "./analytics.js";
-import { fleetMachines, readFleetMachine } from "./core/fleet.mjs";
+import { fleetMachines } from "./core/fleet.mjs";
+import { renderQuota } from "./quota-view.js";
+import { insightQuotaHosts, mountQuotaView } from "./quota-projection.mjs";
+import { createQuotaCoordinator, REVISION_KEY, TICK_MS } from "./fleet-quota/coordinator.mjs";
+import { createQuotaEnrollmentStore, ENROLLMENT_OBSERVE_MS } from "./fleet-quota/enrollments.mjs";
 import {
   G,
   H,
@@ -54,6 +58,10 @@ const MAX_CELL = 20;
 const CELL_GAP = 2;
 const DAY_LABEL_WIDTH = 30;
 const TAB = { name: "Insights", mod: "insights" };
+const ALL_MACHINES = "All";
+const LOCAL_MACHINE = "This Computer";
+const LOCAL_EXPORT = `Export ${LOCAL_MACHINE}`;
+const LOCAL_EXPORT_ONLY = `Export is available only for ${LOCAL_MACHINE}.`;
 
 function shortFileName(value) {
   if (typeof value !== "string" || value.length === 0) return "";
@@ -139,13 +147,13 @@ export function fitHeatmapWeeks(heatmap, count) {
 }
 
 /** Categorical chart palette that reads on both dark and light themes. */
-const MODEL_CHART_COLORS = ["#5b8def", "#3fb27f", "#e0a23c", "#d96c92", "#8f6fe0", "#41b3ba", "#e2704f"];
+const CHART_COLORS = ["#5b8def", "#3fb27f", "#e0a23c", "#d96c92", "#8f6fe0", "#41b3ba", "#e2704f"];
 const OTHER_CHART_COLOR = "#6f8fd1";
 const CHART_HEIGHT = 168;
 
-function modelChartColor(name, index) {
+function chartColor(name, index) {
   if (name === "Other") return OTHER_CHART_COLOR;
-  return MODEL_CHART_COLORS[index % MODEL_CHART_COLORS.length];
+  return CHART_COLORS[index] ?? `#${(Math.imul(index, 0x9e3779b1) & 0xffffff).toString(16).padStart(6, "0")}`;
 }
 
 /** Bundled monochrome brand marks, tinted with the surrounding text color. */
@@ -210,10 +218,6 @@ const PRESENTER_FILE = "mods/insights/presenter.mjs";
 // backstop a little past it.
 const PREPARE_TIMEOUT_MS = 30_000;
 const REFRESH_TIMEOUT_MS = 45_000;
-// A fleet read is one small file over the wire; a machine that is slow to
-// answer must not eat the whole refresh budget, and it never blocks the local
-// dashboard, which runs beside it.
-const FLEET_TIMEOUT_MS = 20_000;
 const SAVE_TIMEOUT_MS = 60_000;
 const WATCHDOG_GRACE_MS = 5_000;
 
@@ -295,19 +299,25 @@ function parseRuntimeNode(raw) {
   return node;
 }
 
-function parseFleetView(stdout) {
-  const text = String(stdout ?? "").trim();
-  if (!text) throw new Error("The presentation helper returned no fleet view.");
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error("The presentation helper returned invalid fleet JSON.");
+function parseMachineView(stdout, scope, remoteNames) {
+  const view = JSON.parse(stdout);
+  const expected = scope.kind === "remote" ? [scope.name] : [null, ...remoteNames];
+  const coverage = view?.coverage;
+  if (view?.version !== 1 || view?.kind !== "insights-machine-dashboard"
+    || view.scope?.kind !== scope.kind || view.scope?.name !== scope.name
+    || !Array.isArray(coverage?.machines) || coverage.total !== expected.length || coverage.machines.length !== expected.length
+    || !coverage.machines.every((entry, index) => entry?.name === expected[index]
+      && ["fresh", "stale", "unavailable"].includes(entry.status))) throw new Error("Unexpected machine scope");
+  const readable = coverage.machines.filter(({ status }) => status !== "unavailable").length;
+  const stale = coverage.machines.filter(({ status }) => status === "stale").length;
+  const { dashboard } = view;
+  if (coverage.readable !== readable || coverage.stale !== stale || coverage.partial !== (readable < expected.length)
+    || (readable ? !dashboard?.facets || !dashboard?.heatmap : dashboard !== null)
+    || (readable && scope.kind === "all"
+      && (!Array.isArray(dashboard.machineSeries?.weeks) || !Array.isArray(dashboard.machineSeries?.machines)))) {
+    throw new Error("Unexpected machine dashboard");
   }
-  if (!parsed || typeof parsed !== "object" || parsed.kind !== "insights-fleet") {
-    throw new Error("The presentation helper returned an unexpected fleet payload.");
-  }
-  return parsed;
+  return view;
 }
 
 function parseSnapshot(stdout) {
@@ -574,9 +584,26 @@ export default class Insights extends View {
     this.refreshWatchdog = null;
     this.saveWatchdog = null;
     this.years = [Number(todayKey().slice(0, 4))];
-    this.fleet = null;
-    this.fleetTask = null;
+    this.machineScope = { kind: "all" };
+    this.machineView = null;
+    this.machineError = null;
+    this.machineEpoch = 0;
+    this.machineRegistryKey = null;
+    this.renderedMachineRegistry = null;
+    this.machineRegistryTimer = null;
+    this.quotaHosts = null;
+    this.quotaView = null;
 
+    if (checking()) return;
+    const enrollment = createQuotaEnrollmentStore({ appHome, checking, readTextFile, writeTextFile });
+    this.quotaView = mountQuotaView(cx, {
+      coordinator: createQuotaCoordinator({
+        shared, setShared, exec, machines, checking,
+        readEnrollments: enrollment.readEnrollments, invalidateEnrollment: enrollment.invalidateEnrollment,
+      }),
+      shared, revisionKey: REVISION_KEY, tickMs: TICK_MS,
+      observeEnrollments: enrollment.observe, enrollmentObserveMs: ENROLLMENT_OBSERVE_MS,
+    });
     this.resolveRuntime(cx);
     this.commandTask = cx.spawn(async (commandCx) => {
       for (;;) {
@@ -617,7 +644,11 @@ export default class Insights extends View {
   close() {
     this.closed = true;
     if (this.toolbarMode) return;
+    this.quotaView?.dispose();
+    this.quotaView = null;
     this.cancelDashboardWork();
+    try { this.machineRegistryTimer?.cancel(); } catch { /* already gone */ }
+    this.machineRegistryTimer = null;
     this.activityGeneration = (this.activityGeneration ?? 0) + 1;
     try { this.activityTask?.cancel(); } catch { /* already gone */ }
     this.activityTask = null;
@@ -752,11 +783,11 @@ export default class Insights extends View {
 
   dashboardCurrent() {
     return Boolean(this.dashboard)
-      && this.dashboardKey === presentationKey(this.snapshot, this.dashboardOptions());
+      && this.dashboardKey === presentationKey(this.snapshot, this.dashboardOptions({ follow: false }));
   }
 
   exportReady() {
-    return !this.closed && this.dashboardCurrent() && !this.exporting && !this.busy()
+    return this.machineScope.kind === "local" && !this.closed && this.dashboardCurrent() && !this.exporting && !this.busy()
       && !this.dashboardPending && !this.dashboardQueued;
   }
 
@@ -855,8 +886,8 @@ export default class Insights extends View {
     }
   }
 
-  dashboardOptions() {
-    this.followToday();
+  dashboardOptions({ follow = true } = {}) {
+    if (follow) this.followToday();
     return {
       filters: this.filters,
       period: this.period,
@@ -973,7 +1004,7 @@ export default class Insights extends View {
         this.scheduleScanContinue(timerCx);
         return;
       }
-      this.refresh(timerCx);
+      this.refresh(timerCx, { scanOnly: true });
     });
   }
 
@@ -1048,21 +1079,60 @@ export default class Insights extends View {
     this.dashboardWatchdog = null;
   }
 
+  machineTarget() {
+    const scope = this.machineScope;
+    const remoteNames = [...new Set(fleetMachines(machines()).map(({ name }) => name).filter((name) => name !== null))];
+    const registry = JSON.stringify(remoteNames);
+    if (this.machineRegistryKey !== registry) {
+      this.machineRegistryKey = registry;
+      this.machineEpoch = (this.machineEpoch ?? 0) + 1;
+    }
+    const local = scope.kind === "local" || (scope.kind === "all" && remoteNames.length === 0);
+    return { scope, remoteNames, local };
+  }
+
+  dashboardRequest(target = this.machineTarget(), options = this.dashboardOptions()) {
+    if (target.local) return { local: true, key: presentationKey(this.snapshot, options), options };
+    const config = this.snapshot?.config;
+    const request = {
+      ...options, scope: target.scope, remoteNames: target.remoteNames,
+      includeCache: config ? config.includeCache !== false : undefined,
+      weekStartsOn: config ? (config.weekStartsOn === 1 ? 1 : 0) : undefined,
+    };
+    const scan = target.scope.kind === "all"
+      ? [this.snapshot?.lastCompletedScanAt, this.snapshot?.config?.sources]
+      : null;
+    return { local: false, key: JSON.stringify([this.machineEpoch, request, scan]), options: request };
+  }
+
+  setMachine(key, cx) {
+    const name = key.startsWith("remote:") ? key.slice("remote:".length) : null;
+    if (name !== null && !this.machineTarget().remoteNames.includes(name)) return;
+    if (name === null && key !== "all" && key !== "local") return;
+    this.machineScope = name === null ? { kind: key } : { kind: "remote", name };
+    this.machineEpoch = (this.machineEpoch ?? 0) + 1;
+    this.openFilter = null;
+    this.openOptions = null;
+    if (this.machineTarget().local && this.dashboard?.years?.length) this.years = this.dashboard.years;
+    this.scheduleDashboard(cx);
+  }
+
   scheduleDashboard(cx, { force = false } = {}) {
-    if (!this.snapshot || !this.nodeBinary || this.runtimeError) return;
-    const options = this.dashboardOptions();
-    const key = presentationKey(this.snapshot, options);
-    if (!force && this.dashboard && this.dashboardKey === key) return;
-    if (!force && this.dashboardPending === key) return;
+    if (this.closed || !this.nodeBinary || this.runtimeError) return;
+    const request = this.dashboardRequest();
+    const { key, local } = request;
+    if (local && !this.snapshot) return;
+    if (!force && (local ? this.dashboard && this.dashboardKey === key : this.machineView?.key === key)) return;
+    if (this.dashboardPending === key) return;
     if (this.dashboardTask) {
       // Coalesce every filter/settings change made while a prepare is running.
       this.dashboardQueued = true;
-      this.dashboardError = null;
       return;
     }
     try { this.dashboardTimer?.cancel(); } catch { /* already gone */ }
-    this.dashboardPending = key;
-    this.dashboardError = null;
+    this.dashboardPending = request.key;
+    if (local) this.dashboardError = null;
+    else this.machineError = null;
     this.dashboardTimer = cx.timer.after(0, (timerCx) => {
       this.dashboardTimer = null;
       this.prepareDashboard(timerCx, key);
@@ -1070,25 +1140,33 @@ export default class Insights extends View {
   }
 
   prepareDashboard(cx, key) {
-    if (!this.snapshot || !this.nodeBinary || this.runtimeError) return;
-    const options = this.dashboardOptions();
-    if (presentationKey(this.snapshot, options) !== key) {
+    if (this.closed || !this.nodeBinary || this.runtimeError) return;
+    const { key: currentKey, options, local } = this.dashboardRequest();
+    if (currentKey !== key) {
       // A newer snapshot or filter replaced the request before the timer ran.
+      this.dashboardPending = null;
       this.scheduleDashboard(cx, { force: true });
       return;
     }
     const generation = (this.dashboardGeneration ?? 0) + 1;
     this.dashboardGeneration = generation;
+    const current = () => generation === this.dashboardGeneration && this.dashboardRequest().key === key;
+    const reportError = (message) => {
+      if (local) this.dashboardError = message;
+      else this.machineError = { key, message };
+    };
     try { this.dashboardWatchdog?.cancel(); } catch { /* already gone */ }
     this.dashboardWatchdog = cx.timer.after(PREPARE_TIMEOUT_MS + WATCHDOG_GRACE_MS, (timerCx) => {
       this.dashboardWatchdog = null;
       if (generation !== this.dashboardGeneration) return;
+      const shouldRetry = this.dashboardQueued || !current();
+      if (!shouldRetry) reportError("Preparing the dashboard timed out. Retry to try again.");
       this.dashboardGeneration += 1;
       this.dashboardPending = null;
       this.dashboardQueued = false;
       try { this.dashboardTask?.cancel(); } catch { /* already gone */ }
       this.dashboardTask = null;
-      this.dashboardError = "Preparing the dashboard timed out. Retry to try again.";
+      if (shouldRetry) this.scheduleDashboard(timerCx);
       timerCx.notify();
     });
     let task = null;
@@ -1096,113 +1174,50 @@ export default class Insights extends View {
       try {
         const result = await this.execNode([
           this.presenterPath(),
-          "prepare",
+          local ? "prepare" : "machine-dashboard",
           "--store",
           this.storePath(),
           "--options",
           JSON.stringify(options),
         ], { timeout: PREPARE_TIMEOUT_MS });
-        if (result.code !== 0) throw new Error(resultError(result));
-        const payload = parseSnapshot(result.stdout);
-        if (generation !== this.dashboardGeneration) return;
-        if (payload.error && !payload.dashboard) throw new Error(payload.error);
-        if (!payload.dashboard) throw new Error("The presentation helper returned no dashboard.");
-        if (!this.snapshot || presentationKey(this.snapshot, this.dashboardOptions()) !== key) return;
-        this.dashboard = payload.dashboard;
-        this.dashboardKey = key;
-        if (Array.isArray(payload.dashboard.years) && payload.dashboard.years.length) this.years = payload.dashboard.years;
-        this.dashboardError = null;
-      } catch (error) {
-        if (generation === this.dashboardGeneration && this.snapshot
-          && presentationKey(this.snapshot, this.dashboardOptions()) === key) {
-          this.dashboardError = sanitizeError(error);
+        if (!current()) return;
+        if (result.code !== 0) throw new Error(local ? resultError(result) : "Could not prepare machine usage.");
+        const payload = local ? parseSnapshot(result.stdout) : parseMachineView(result.stdout, options.scope, options.remoteNames);
+        if (local) {
+          if (!payload.dashboard) throw new Error(payload.error || "The presentation helper returned no dashboard.");
+          this.dashboard = payload.dashboard;
+          this.dashboardKey = key;
+          this.dashboardError = null;
+        } else {
+          this.machineView = { key, payload };
+          this.machineError = null;
         }
+        if (payload.dashboard?.years?.length) this.years = payload.dashboard.years;
+      } catch (error) {
+        if (current()) reportError(local ? sanitizeError(error) : "Could not prepare machine usage. Retry to try again.");
       } finally {
         if (generation === this.dashboardGeneration) {
+          const shouldRetry = this.dashboardQueued || !current();
           try { this.dashboardWatchdog?.cancel(); } catch { /* already gone */ }
           this.dashboardWatchdog = null;
           if (this.dashboardPending === key) this.dashboardPending = null;
           if (this.dashboardTask === task) this.dashboardTask = null;
           prepareCx.notify();
-          if (this.dashboardQueued) {
-            this.dashboardQueued = false;
-            this.scheduleDashboard(prepareCx);
-          }
+          this.dashboardQueued = false;
+          if (shouldRetry) this.scheduleDashboard(prepareCx);
         }
       }
     });
     this.dashboardTask = task;
   }
 
-  /**
-   * Read the usage cache of every other machine Herdr knows, then let the
-   * Node helper do the aggregation: the UI fetches, Node computes, the UI
-   * renders the compact result.
-   *
-   * Each read stands alone: a machine that cannot be reached keeps its own
-   * reason and is never counted as a machine that used nothing. The read runs
-   * beside the local refresh, so a slow or missing machine never holds up this
-   * computer's dashboard.
-   */
-  readFleet(cx) {
-    if (this.closed || this.fleetTask) return;
-    const remote = fleetMachines(machines()).filter((machine) => machine.name !== null);
-    if (remote.length === 0) {
-      // No other machine: drop a fleet card that is no longer true, but do not
-      // wake the view for a fleet that was never there.
-      if (this.fleet) {
-        this.fleet = null;
-        cx.notify();
-      }
-      return;
-    }
-    this.fleetTask = cx.spawn(async (fleetCx) => {
-      const entries = [];
-      for (const machine of remote) {
-        entries.push(await readFleetMachine(machine, { exec, timeout: FLEET_TIMEOUT_MS }));
-      }
-      if (this.closed) return;
-      let view = null;
-      try {
-        const config = this.snapshot?.config ?? {};
-        const payload = {
-          includeCache: config.includeCache !== false,
-          weekStartsOn: config.weekStartsOn,
-          machines: entries.map((entry) => ({
-            label: entry.label,
-            ok: entry.ok,
-            reason: entry.reason,
-            rows: entry.rows,
-            savedAt: entry.savedAt,
-            refreshSeconds: entry.config?.refreshSeconds,
-          })),
-        };
-        const options = { ...this.dashboardOptions(), fleet: payload };
-        const result = await this.execNode([
-          this.presenterPath(),
-          "fleet",
-          "--options",
-          JSON.stringify(options),
-        ], { timeout: FLEET_TIMEOUT_MS });
-        if (result.code === 0) view = parseFleetView(result.stdout);
-      } catch {
-        // A fleet that cannot be computed leaves the local dashboard untouched.
-        view = null;
-      }
-      if (this.closed) return;
-      this.fleet = view;
-      this.fleetTask = null;
-      fleetCx.notify();
-    });
-  }
-
-  refresh(cx) {
+  refresh(cx, { scanOnly = false } = {}) {
     if (this.closed || !this.runtimeReady) return;
-    this.readFleet(cx);
     if (this.runtimeError) {
       this.resolveRuntime(cx);
       return;
     }
+    if (!scanOnly && !this.machineTarget().local) this.scheduleDashboard(cx, { force: true });
     if (this.busy()) return;
     this.cancelScanContinue();
     const generation = (this.activityGeneration ?? 0) + 1;
@@ -1266,8 +1281,8 @@ export default class Insights extends View {
       let failure = null;
       let savedPath = null;
       try {
-        const folder = await pickFolder({ prompt: "Export" });
-        if (!folder) return;
+        const folder = await pickFolder({ prompt: LOCAL_EXPORT });
+        if (!folder || this.closed || this.machineScope.kind !== "local") return;
         const base = String(folder).replace(/[\\/]+$/, "");
         savedPath = `${base}/insights-${exportStamp(now)}.md`;
         await writeTextFile(savedPath, markdown, null);
@@ -1291,15 +1306,18 @@ export default class Insights extends View {
   applySnapshot(payload, cx) {
     if (!isPresentation(payload)) throw new Error("The presentation helper returned an unexpected dashboard payload.");
     const snapshot = payload.snapshot;
-    this.cancelDashboardWork();
+    const target = this.machineTarget();
+    if (target.local) this.cancelDashboardWork();
     this.snapshot = snapshot;
     const savedConfig = normalizeConfig(snapshot.config);
     const today = todayKey();
     const years = Array.isArray(payload.dashboard?.years) && payload.dashboard.years.length
       ? payload.dashboard.years
       : [Number(today.slice(0, 4))];
-    this.years = years;
-    if (!Number.isInteger(this.year) || !years.includes(this.year)) this.year = years[0] ?? Number(today.slice(0, 4));
+    if (target.local) {
+      this.years = years;
+      if (!Number.isInteger(this.year) || !years.includes(this.year)) this.year = years[0] ?? Number(today.slice(0, 4));
+    }
     if (!isDay(this.selectedDay)) this.selectedDay = today;
 
     // Publish the compact dashboard before editor and input host work so an
@@ -1316,7 +1334,7 @@ export default class Insights extends View {
       this.dashboardError = payload.error ? sanitizeError(payload.error) : null;
     }
     this.schedule(cx);
-    if (!this.dashboard) this.scheduleDashboard(cx, { force: true });
+    if (!target.local || !this.dashboard) this.scheduleDashboard(cx);
 
     if (!this.configDirty && !this.editorDirty) {
       this.configDraft = deepClone(savedConfig);
@@ -1638,20 +1656,38 @@ export default class Insights extends View {
     this.scheduleDashboard(cx, { force: true });
   }
 
-  render(_cx) {
+  render(cx) {
     if (this.toolbarMode) return this.toolbar();
     const c = tokens(theme());
     const width = this.width || 960;
     const padding = width < 620 ? G.md : width < 900 ? G.lg : G.xl;
-    const content = [this.header(c)];
-    if (this.error && this.snapshot) content.push(this.errorBanner(c));
+    const target = this.machineTarget();
+    const quotaHosts = insightQuotaHosts(this.quotaView?.read(cx), LOCAL_MACHINE, Date.now(), target.remoteNames) ?? this.quotaHosts;
+    this.machineLabels = new Map(quotaHosts?.filter(({ name }) => name !== null).map(({ name, label }) => [name, label]));
+    if (this.renderedMachineRegistry !== this.machineRegistryKey) {
+      this.renderedMachineRegistry = this.machineRegistryKey;
+      // App re-renders when machines() changes; defer preparation until after this frame.
+      if (!target.local && !this.closed && this.nodeBinary && !this.runtimeError && !this.machineRegistryTimer) {
+        this.machineRegistryTimer = cx.timer.after(0, (timerCx) => {
+          this.machineRegistryTimer = null;
+          this.scheduleDashboard(timerCx);
+          timerCx.notify();
+        });
+      }
+    }
+    const content = [this.header(c, target)];
+    if (this.error && this.snapshot && (target.local || this.showSettings)) content.push(this.errorBanner(c));
     // Without a dashboard yet, dashboardView's own card shows the error and Retry.
-    if (this.dashboardError && this.snapshot && (this.dashboard || this.showSettings)) {
+    if (this.dashboardError && this.snapshot && (this.showSettings || (target.local && this.dashboardCurrent()))) {
       content.push(this.dashboardErrorBanner(c));
     }
-    if (!this.snapshot) content.push(this.initialState(c));
-    else if (this.showSettings) content.push(this.settingsView(c));
-    else content.push(this.dashboardView(c));
+    if (this.showSettings && this.snapshot) content.push(this.settingsView(c));
+    else {
+      content.push(this.machinePicker(c, target));
+      const quotas = renderQuota(quotaHosts, target.scope, c, { localLabel: LOCAL_MACHINE });
+      if (quotas) content.push(quotas);
+      content.push(!this.snapshot && target.local ? this.initialState(c) : this.dashboardView(c, target));
+    }
 
     return v_flex().id("insights-root").size_full().min_h(0).bg(c.canvas).text_color(c.text)
       .overflow_y_scrollbar()
@@ -1685,20 +1721,22 @@ export default class Insights extends View {
         .child("Insights"));
   }
 
-  header(c) {
+  header(c, target = this.machineTarget()) {
     const scan = this.snapshot?.scan;
     const updated = this.snapshot
       ? formatTimestamp(this.snapshot.lastCompletedScanAt || this.snapshot.lastScanAt || this.snapshot.generatedAt)
       : "";
     const preparing = !this.dashboard && (this.dashboardPending || this.dashboardQueued);
     const scanning = this.scanStatusLabel(scan);
-    const status = this.loading ? "Refreshing…"
+    const status = this.loading ? (target.local ? "Refreshing…" : `Refreshing ${LOCAL_MACHINE}…`)
       : this.saving ? "Saving…"
-        : preparing ? "Preparing…"
+        : !target.local ? ""
+          : preparing ? "Preparing…"
           : this.error ? (this.snapshot ? "Showing last snapshot" : "Unavailable")
             : this.dashboardError ? "Could not prepare dashboard"
               : scanning || (updated ? `Updated ${updated}` : "");
-    const statusError = Boolean(this.error || this.dashboardError);
+    const statusError = target.local && Boolean(this.error || this.dashboardError);
+    const exportLabel = this.exporting ? "Exporting…" : target.scope.kind === "local" ? LOCAL_EXPORT : "Export";
     return h_flex().w_full().flex_wrap().gap(G.md).items_center().justify_between()
       .child(pageTitle(this.showSettings ? "Settings" : "Insights", c))
       .child(h_flex().flex_wrap().gap(G.sm).items_center()
@@ -1708,8 +1746,10 @@ export default class Insights extends View {
           disabled: this.busy(),
           variant: "outline",
         }))
-        .child(button("insights-export", this.exporting ? "Exporting…" : "Export", (_event, clickCx) => this.exportMarkdown(clickCx), c, {
+        .child(button("insights-export", exportLabel, (_event, clickCx) => this.exportMarkdown(clickCx), c, {
           disabled: !this.exportReady(),
+          accessibilityLabel: exportLabel,
+          tooltip: target.scope.kind === "local" ? `${LOCAL_EXPORT} as Markdown` : LOCAL_EXPORT_ONLY,
           variant: "outline",
         }))
         .when(Boolean(this.snapshot), (el) => el.child(button(
@@ -1730,7 +1770,7 @@ export default class Insights extends View {
 
   errorBanner(c) {
     return notice(c, {
-      title: "Could not refresh insights",
+      title: `Could not refresh ${LOCAL_MACHINE} insights`,
       body: this.error,
       action: button("insights-retry", "Retry", (_event, clickCx) => this.refresh(clickCx), c, {
         disabled: this.busy(),
@@ -1748,7 +1788,7 @@ export default class Insights extends View {
     const decodedBytes = Number(progress?.decodedBytes ?? progress?.bytes) || 0;
     return stateCard(c, {
       tone: loading ? c.accent : c.destructive,
-      title: loading ? "Loading local insights" : "Insights needs its collector",
+      title: loading ? `Loading ${LOCAL_MACHINE} insights` : `${LOCAL_MACHINE} · Token history unavailable`,
       body: loading
         ? [
           total > 0 ? `Scanning ${formatInt(processed)} of ${formatInt(total)} files` : null,
@@ -1773,75 +1813,91 @@ export default class Insights extends View {
     });
   }
 
-  /**
-   * The fleet: the same usage, read from every other machine Herdr knows.
-   *
-   * The numbers arrive computed from the Node helper, so they obey the same
-   * period, the same facets and the same includeCache rule as this computer's.
-   * A machine that could not be read keeps its own reason and is never shown
-   * as a machine that used nothing.
-   */
-  fleetCard(c) {
-    const fleet = this.fleet;
-    if (!fleet) return null;
-    const machines = Array.isArray(fleet.machines) ? fleet.machines : [];
-    const skipped = Array.isArray(fleet.skipped) ? fleet.skipped : [];
-    if (machines.length === 0 && skipped.length === 0) return null;
-    const total = fleet.fleet?.total ?? 0;
-    const subtitle = machines.length === 0
-      ? `${fleet.range} · no machine has shared usage yet`
-      : `${fleet.range} · ${formatCompact(total)} tokens across ${machines.length} machine${machines.length === 1 ? "" : "s"}`;
-    return card(c).gap(G.sm)
-      .child(cardHeader("Fleet usage", subtitle, c))
-      .children(machines.map((machine) => this.fleetRow(c, machine)))
-      .children(skipped.map((machine) => this.fleetRow(c, machine, true)));
+  machineLabel(name) {
+    return (name == null ? LOCAL_MACHINE : this.machineLabels?.get(name)) || name;
   }
 
-  fleetRow(c, machine, unreadable = false) {
-    const stale = Boolean(machine?.stale);
-    const age = Number.isFinite(machine?.ageMs) ? formatDuration(machine.ageMs) : null;
-    const note = unreadable
-      ? "not counted"
-      : stale
-        ? `stale${age ? ` · ${age} old` : ""}`
-        : age ? `${age} old` : null;
-    return h_flex().w_full().flex_wrap().gap(G.sm).items_center().justify_between()
-      .child(h_flex().gap(G.sm).items_center().min_w(0)
-        .child(div().text_size(T.body).font_medium().text_color(c.text).child(machine.label))
-        .when(Boolean(note), (el) => el.child(div().text_size(T.small).text_color(c.dim).child(note))))
-      .child(div().text_size(T.body).font_semibold()
-        .text_color(unreadable ? c.dim : c.text)
-        .child(unreadable ? machine.reason : formatCompact(machine.totals?.total ?? 0)));
+  machinePicker(c, { scope, remoteNames }) {
+    const items = [{ key: "all", label: ALL_MACHINES }, { key: "local", label: LOCAL_MACHINE }];
+    for (const name of remoteNames) items.push({ key: `remote:${name}`, label: this.machineLabel(name) });
+    const selected = scope.kind === "remote" ? `remote:${scope.name}` : scope.kind;
+    if (scope.kind === "remote" && !remoteNames.includes(scope.name)) {
+      items.push({ key: selected, label: this.machineLabel(scope.name) });
+    }
+    return h_flex().w_full().flex_wrap().items_center().gap(G.sm)
+      .child(fieldLabel("Machine", c))
+      .child(segmented("ins-machine", items, selected, (key, cx) => this.setMachine(key, cx), c))
+      .when(scope.kind !== "local", (el) => el.child(mutedText(LOCAL_EXPORT_ONLY, c)));
   }
 
-  dashboardView(c) {
-    const derived = this.dashboard;
+  cacheNotices(c, machines) {
+    return machines.filter(({ status }) => status !== "fresh").map(({ name, status, ageMs, reason }) => {
+      const age = Number.isFinite(ageMs) ? `${formatDuration(ageMs)} old` : "age unknown";
+      const detail = status === "stale" ? `Showing older usage data · ${age}` : `Token history unavailable · ${reason}`;
+      return mutedText(`${this.machineLabel(name)} · ${detail}`, c);
+    });
+  }
+
+  dashboardView(c, target = this.machineTarget()) {
+    const { scope, remoteNames, local } = target;
+    const key = local ? null : this.dashboardRequest(target, this.dashboardOptions({ follow: false })).key;
+    const view = !local && this.machineView?.key === key ? this.machineView.payload : null;
+    const scopeLabel = scope.kind === "all" ? ALL_MACHINES : this.machineLabel(scope.name);
+    let caches = view?.coverage.machines ?? [];
+    if (local && this.dashboard) {
+      const parsed = Date.parse(this.snapshot?.savedAt ?? this.snapshot?.lastScanAt ?? "");
+      const ageMs = Number.isFinite(parsed) ? Math.max(0, Date.now() - parsed) : null;
+      const readable = ageMs !== null || this.dashboard.rowCount > 0;
+      const stale = ageMs === null || ageMs > clampRefreshSeconds(this.snapshot?.config?.refreshSeconds) * 1000;
+      caches = [{
+        name: null, status: !readable ? "unavailable" : stale ? "stale" : "fresh", ageMs,
+        reason: readable ? null : "no cache on that machine",
+      }];
+    } else if (scope.kind === "remote" && !remoteNames.includes(scope.name)) {
+      caches = [{
+        name: scope.name, status: "unavailable", ageMs: null, reason: "machine is not registered",
+      }];
+    }
+    const cacheNotices = this.cacheNotices(c, caches);
+    const contents = v_flex().w_full().gap(G.lg)
+      .when(cacheNotices.length > 0, (el) => el.child(v_flex().w_full().gap(G.xs).children(cacheNotices)));
+    const derived = local ? (this.dashboardCurrent() ? this.dashboard : null) : view?.dashboard;
+    const error = local ? this.dashboardError
+      : this.runtimeError ? "The Insights presentation helper is unavailable."
+        : this.machineError?.key === key ? this.machineError.message : null;
+    const pending = local ? Boolean(this.dashboardPending) : this.dashboardPending === key;
+    if (caches.length && caches.every(({ status }) => status === "unavailable")) return contents;
     if (!derived) {
       const retry = (id, primary) => button(id, "Retry", (_event, clickCx) => {
-        this.scheduleDashboard(clickCx, { force: true });
+        if (this.runtimeError) this.refresh(clickCx);
+        else this.scheduleDashboard(clickCx, { force: true });
         clickCx.notify();
-      }, c, { disabled: Boolean(this.dashboardPending), variant: primary ? "primary" : "outline" });
-      if (this.dashboardError) {
-        return stateCard(c, {
+      }, c, { disabled: pending, variant: primary ? "primary" : "outline" });
+      if (error) {
+        return contents.child(stateCard(c, {
           tone: c.destructive,
-          title: "Could not prepare insights",
-          body: this.dashboardError,
+          title: `Could not prepare ${scopeLabel} insights`,
+          body: error,
           action: retry("insights-prepare-retry", true),
-        });
+        }));
       }
-      return stateCard(c, {
+      return contents.child(stateCard(c, {
         tone: c.accent,
-        title: "Preparing insights",
+        title: `Preparing ${scopeLabel} insights`,
         action: retry("insights-prepare-retry", false),
-      });
+      }));
     }
-    const { config, rowCount, range, lifetime, peak, streaks, heatmap, leaders, selectedDay, selectedTotals, selectedTop, years } = derived;
+    const { rowCount, range, lifetime, peak, streaks, heatmap, leaders, selectedDay, selectedTotals, selectedTop, years } = derived;
+    const config = local ? derived.config : { ...derived.config, palette: this.snapshot?.config?.palette };
+    const machineSeries = scope.kind === "all" ? (local ? derived.modelSeries : derived.machineSeries) : null;
 
-    return v_flex().w_full().gap(G.lg)
+    return contents
+      .when(Boolean(!local && error), (el) => el.child(notice(c, { title: `Could not refresh ${scopeLabel} token history`, body: error })))
+      .child(this.sectionHeader(`Token usage · ${scopeLabel}`, c))
       .child(this.metricStrip(c, lifetime, peak, streaks))
-      .child(this.fleetCard(c))
-      .when(rowCount === 0, (el) => el.child(this.emptyNotice(c, config)))
-      .child(this.sectionHeader("Token usage", c))
+      .when(rowCount === 0, (el) => el.child(local ? this.emptyNotice(c, config)
+        : stateCard(c, { tone: c.dim, title: "No token usage for this selection" })))
+      .when(Boolean(machineSeries?.weeks?.length), (el) => el.child(this.machineChartCard(c, machineSeries, local)))
       .child(this.heatmapCard(c, config, heatmap, selectedDay, range))
       .child(this.tokenDetailCard(c, heatmap, selectedDay, derived.today, selectedTotals, selectedTop, lifetime, derived.lifetimeTop))
       .child(this.sectionHeader("Model usage", c))
@@ -2108,34 +2164,50 @@ export default class Insights extends View {
   }
 
   modelChartCard(c, series) {
+    return this.historyChartCard(c, series, {
+      title: "Top models", empty: "No model usage in this window.", names: series.models,
+    });
+  }
+
+  machineChartCard(c, series, local) {
+    return this.historyChartCard(c, series, {
+      title: "Token history by machine",
+      empty: "No machine usage in this window.",
+      names: local ? [null] : series.machines,
+      label: (name) => this.machineLabel(name),
+      segments: local ? (week) => [{ name: null, tokens: week.total }] : undefined,
+    });
+  }
+
+  historyChartCard(c, series, { title, empty, names, label = (name) => name, segments = (week) => week.segments }) {
     const weeks = series.weeks;
     const maxTotal = series.maxTotal || 0;
-    const colors = new Map(series.models.map((name, index) => [name, modelChartColor(name, index)]));
+    const colors = new Map(names.map((name, index) => [name, chartColor(name, index)]));
 
     const bar = (week) => v_flex().flex_1().min_w(0).h(CHART_HEIGHT).justify_end()
       .tooltip(`Week of ${dayLabel(week.start)} · ${formatCompact(week.total)} tokens`)
       .when(week.total > 0 && maxTotal > 0, (el) => el.child(
         v_flex().w_full().flex_none().h(Math.max(2, Math.round((week.total / maxTotal) * CHART_HEIGHT)))
-          .children(week.segments.map((segment) => div().w_full().flex_grow(Math.max(0.001, segment.tokens))
+          .children(segments(week).map((segment) => div().w_full().flex_grow(Math.max(0.001, segment.tokens))
             .bg(colors.get(segment.name) ?? OTHER_CHART_COLOR)
-            .tooltip(`${segment.name} · ${formatCompact(segment.tokens)} tokens`))),
+            .tooltip(`${label(segment.name)} · ${formatCompact(segment.tokens)} tokens`))),
       ));
 
     const axisLabel = (text) => div().text_size(9).text_color(c.dim).child(text);
     const labelStep = Math.ceil(weeks.length / 6);
     const legend = h_flex().w_full().flex_wrap().gap_x(G.lg).gap_y(G.xs).items_center()
-      .children(series.models.map((name) => h_flex().items_center().gap(G.xs)
+      .children(names.map((name) => h_flex().items_center().gap(G.xs)
         .child(div().size(8).flex_none().rounded_full().bg(colors.get(name) ?? OTHER_CHART_COLOR))
-        .child(div().max_w(180).truncate().text_size(T.label).text_color(c.mutedForeground).tooltip(name).child(name))));
+        .child(div().max_w(180).truncate().text_size(T.label).text_color(c.mutedForeground).tooltip(label(name)).child(label(name)))));
 
     return card(c).gap(G.md)
       .child(cardHeader(
-        "Top models",
+        title,
         `${weeks.length} week${weeks.length === 1 ? "" : "s"} · ${formatCompact(series.windowTotal)} tokens · ${series.includeCache ? "cache included" : "cache excluded"}`,
         c,
       ))
       .when(maxTotal === 0, (el) => el.child(div().py(G.lg).text_size(T.body).text_color(c.mutedForeground)
-        .child("No model usage in this window.")))
+        .child(empty)))
       .when(maxTotal > 0, (el) => el.child(v_flex().w_full().gap(G.sm)
         .child(h_flex().w_full().gap(G.sm).items_end()
           .child(v_flex().w(28).flex_none().h(CHART_HEIGHT).justify_between().children([
