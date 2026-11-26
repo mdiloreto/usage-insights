@@ -1,0 +1,1 @@
+{"schemaVersion":1,"id":"claude","ready":true,"tierLabel":"Max 5x","limitsStale":false,"limitsFetchedAt":1795704635926,"limits":[{"label":"Session (5-hour) person@example.invalid","percent":0.5,"resetsAt":""},{"label":"Weekly (7-day)","title":"owner@example.invalid","percent":0.5,"resetsAt":""},{"label":"Weekly (7-day)","percent":0.08,"resetsAt":""}]}

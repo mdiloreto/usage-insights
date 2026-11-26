@@ -1,0 +1,1 @@
+{"schemaVersion":1,"id":"agy","name":"Antigravity","updatedAt":"2026-11-11T08:47:00Z","ready":true,"tierLabel":"Pro","limitsStale":true,"limitsFetchedAt":1794300000000,"limits":[{"label":"Session (5-hour)","title":"Session","percent":0.0,"resetsAt":"2026-11-11T14:00:00+00:00"},{"label":"Weekly (7-day)","title":"Weekly","percent":0.0,"resetsAt":"2026-11-11T20:00:00+00:00"}]}
