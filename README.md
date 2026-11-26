@@ -92,14 +92,76 @@ marked stale.
 
 ## Privacy
 
-No network requests or uploads. The mod runs a local Node helper, reads session
-files and OpenCode/Antigravity SQLite databases, and writes usage metadata to
+Usage statistics need no request to any provider, and nothing is uploaded. The
+mod runs a local Node helper, reads session files and OpenCode/Antigravity SQLite
+databases, and writes usage metadata to
 `~/.config/herdr-app/data/insights/insights.json`. It does not store prompt or
 response text or modify source transcripts.
 
 Reading another machine's usage cache is a local file read over Herdr's own
 connection: nothing leaves the fleet, and the helper still never uploads
 anything.
+
+### Quotas
+
+Quota readings are different: they come from the providers, asked with the
+sign-in already on the machine being read.
+
+- **This computer:** each loaded copy of the bar in
+  `mods/usage-limits-fleet-canary`, which `npm run install:local` does not
+  install, asks Claude (`claude -p`, `get_usage`) and Codex (`codex app-server`)
+  when it loads and every five minutes (hourly while a CLI is not installed). A
+  manual refresh, or showing a hidden provider again, asks sooner. The bar also
+  counts OpenCode and Pi tokens from local files; when it does not find
+  OpenCode's database, or `HERDR_USAGE_OPENCODE_BIN` is set, it runs
+  `opencode stats` instead, and what that CLI contacts is outside this project.
+  The dashboard only shows what a bar has read.
+- **Another machine:** its providers are not asked until you install the quota
+  helper there (Linux: `sh scripts/install-quota.sh`, then the same with
+  `enroll`) and add that grant by hand to a viewer's enrollment file:
+  `<app home>/data/fleet-quota/enrollments.json` for the dashboard,
+  `<app home>/data/fleet-quota-canary/enrollments.json` for the bar. `enroll`
+  prints only the binding; you write the rest of the grant (each mod's
+  `fleet-quota/enrollments.mjs` checks the file, and `readGrants` and
+  `fingerprintCore` in its `fleet-quota/protocol.mjs` define the values). To use
+  both viewers, put the same binding in both files; running `enroll` again
+  replaces it. Each viewer reads only its own file. While loaded, it may ask the
+  helper, only about the providers in that grant:
+  - Codex through `codex app-server`, falling back to the Omarchy collector's
+    record.
+  - Claude through `claude -p` `get_usage`, or `/usage` in a hidden terminal
+    session if you set that up. It skips both while that machine's Omarchy
+    collector record is current.
+  - Copilot and Antigravity only from the Omarchy collector's record.
+  - A manual refresh may also run `~/.local/bin/herdr-fleet-quota-refresh` on
+    that machine, if present. That program is not part of this repository and may
+    contact the provider.
+
+  Under one grant, the helper starts a CLI quota check for a provider at most
+  every five minutes, or every 30 seconds on a manual refresh, and less often
+  after repeated failures. One Claude check can make both requests above. In
+  between, it may ask the CLI which account is signed in.
+
+Enrolled or not, every registered machine also gets a `uname -s` from the bar,
+over Herdr, to label it with its operating system.
+
+The helper returns only quota data, over Herdr's connection: percentages used,
+window names and lengths, reset times, plan, Claude's credit amounts,
+timestamps, a status and hashed identifiers. It returns no tokens, e-mail
+addresses, prompts or responses, and this project uploads nothing anywhere else.
+On the machine being read it keeps its own state, such as the last reading and
+retry times, in `~/.local/state/herdr-quota-v1/`.
+
+To stop the bar on this computer from asking, clear each provider in both the
+**Bar** and **Panel** columns of its settings, or remove it from your layout
+(whether those settings survive a Herdr restart has not been verified).
+Remote reads continue, from the dashboard too, until you run
+`sh scripts/install-quota.sh revoke` on the machine being read (this computer as
+well, if you enrolled it): its helper then refuses before asking anyone.
+Revoking stops only the helper. A bar loaded on that machine, and an Omarchy
+collector or its refresh timer (not part of this repository), keep asking
+providers; the Insights timer from `install-headless.sh` keeps reading local
+session files.
 
 ## Development
 
