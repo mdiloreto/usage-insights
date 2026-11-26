@@ -112,7 +112,9 @@ originals, or unsuccessful switching block removal before deleting any files.
 `main.js` default-exports a gpui-kit `View`; use gpui-base flex/controls, `theme()`
 semantic colors, `on_size_change`, and fresh callback contexts. Do not retain `cx`.
 Cancel tasks/timers and release native editor/input state on close. Use native
-animations, never redraw timers. No DOM, web view, shell interpolation, or network.
+animations, never redraw timers. No DOM, web view, shell interpolation, or network
+client of its own: other machines are reached only through Herdr Core's `exec`,
+aimed with `on`, and a quota helper there may ask providers (see README, Privacy).
 `ui.js` centralizes surfaces, typography, spacing, and controls; bundle provider/model
 SVGs in `logos/`. Some logos carry brand colors, so do not assume they are
 monochrome or theme-tintable. Pure `analytics.js` runs in Node and prepares totals,

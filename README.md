@@ -111,13 +111,22 @@ sign-in already on the machine being read.
   `mods/usage-limits-fleet-canary`, which `npm run install:local` does not
   install, asks Claude (`claude -p`, `get_usage`) and Codex (`codex app-server`)
   when it loads and every five minutes (hourly while a CLI is not installed). A
-  manual refresh, or showing a hidden provider again, asks sooner. The dashboard
-  only shows what a bar has read.
+  manual refresh, or showing a hidden provider again, asks sooner. The bar also
+  counts OpenCode and Pi tokens from local files; when it does not find
+  OpenCode's database, or `HERDR_USAGE_OPENCODE_BIN` is set, it runs
+  `opencode stats` instead, and what that CLI contacts is outside this project.
+  The dashboard only shows what a bar has read.
 - **Another machine:** its providers are not asked until you install the quota
   helper there (Linux: `sh scripts/install-quota.sh`, then the same with
-  `enroll`) and add that grant by hand to the viewer's
-  `<app home>/data/fleet-quota/enrollments.json`. While the bar or the dashboard is loaded,
-  the viewer then asks the helper only about the providers in the grant:
+  `enroll`) and add that grant by hand to a viewer's enrollment file:
+  `<app home>/data/fleet-quota/enrollments.json` for the dashboard,
+  `<app home>/data/fleet-quota-canary/enrollments.json` for the bar. `enroll`
+  prints only the binding; you write the rest of the grant (each mod's
+  `fleet-quota/enrollments.mjs` checks the file, and `readGrants` and
+  `fingerprintCore` in its `fleet-quota/protocol.mjs` define the values). To use
+  both viewers, put the same binding in both files; running `enroll` again
+  replaces it. Each viewer reads only its own file. While loaded, it may ask the
+  helper, only about the providers in that grant:
   - Codex through `codex app-server`, falling back to the Omarchy collector's
     record.
   - Claude through `claude -p` `get_usage`, or `/usage` in a hidden terminal
@@ -133,17 +142,26 @@ sign-in already on the machine being read.
   after repeated failures. One Claude check can make both requests above. In
   between, it may ask the CLI which account is signed in.
 
+Enrolled or not, every registered machine also gets a `uname -s` from the bar,
+over Herdr, to label it with its operating system.
+
 The helper returns only quota data, over Herdr's connection: percentages used,
 window names and lengths, reset times, plan, Claude's credit amounts,
 timestamps, a status and hashed identifiers. It returns no tokens, e-mail
 addresses, prompts or responses, and this project uploads nothing anywhere else.
+On the machine being read it keeps its own state, such as the last reading and
+retry times, in `~/.local/state/herdr-quota-v1/`.
 
 To stop the bar on this computer from asking, clear each provider in both the
-**Bar** and **Panel** columns of its settings, or remove it from your layout.
+**Bar** and **Panel** columns of its settings, or remove it from your layout
+(whether those settings survive a Herdr restart has not been verified).
 Remote reads continue, from the dashboard too, until you run
 `sh scripts/install-quota.sh revoke` on the machine being read (this computer as
-well, if you enrolled it): its helper then refuses before asking anyone. A usage
-collector that a machine runs on its own schedule is separate and keeps running.
+well, if you enrolled it): its helper then refuses before asking anyone.
+Revoking stops only the helper. A bar loaded on that machine, and an Omarchy
+collector or its refresh timer (not part of this repository), keep asking
+providers; the Insights timer from `install-headless.sh` keeps reading local
+session files.
 
 ## Development
 
