@@ -1,5 +1,8 @@
 import { ProbeError } from "./runtime.mjs";
 
+export const WIRE_VERSION = 2;
+export const STALE = 900;
+export const HISTORY = 14 * 86_400;
 export const MAX_WINDOWS = 32;
 export const FRONTIER_MAX_RESET = 62 * 86_400;
 export class ClaudeWindowsMissing extends ProbeError {}
@@ -9,6 +12,8 @@ const MAX_EPOCH = 253_402_300_799;
 const PLANS = {
   codex: new Set(["free", "go", "plus", "pro", "prolite", "team", "business", "enterprise", "edu"]),
   claude: new Set(["free", "pro", "max", "team", "enterprise"]),
+  copilot: new Set(["free", "pro", "pro+", "business", "enterprise"]),
+  agy: new Set(["free", "pro", "ultra"]),
 };
 const SCOPES = ["Opus", "Sonnet", "Haiku", "Fable", "Cowork"];
 export const MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ");
@@ -39,7 +44,7 @@ function validMoney(value) {
   return { currency, usedMinor, limitMinor, ...(resetLabel === undefined ? {} : { resetLabel }) };
 }
 
-function resetTime(value) {
+export function resetTime(value) {
   if (value == null) return null;
   const time = typeof value === "string" &&
     /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
@@ -62,8 +67,10 @@ function labels(provider, id, durationSec) {
     const prefix = bucket === "spark" ? "Spark" : `Bucket ${n}`;
     return [`${prefix} ${short}`, `${prefix} · ${long}`];
   }
+  if (provider === "copilot") return id === "monthly" && durationSec === null ? ["mo", "Monthly"] : null;
   if (id === "session" && durationSec === 5 * HOUR) return ["5h", "5-hour"];
   if (id === "weekly_all" && durationSec === WEEK) return ["wk", "Weekly"];
+  if (provider === "agy") return null;
   if (id === "frontier_credit" && durationSec === null) return ["Frontier credit", "Frontier credit"];
   if (id === "monthly_spend_limit" && durationSec === null) return ["Monthly usage credits", "Monthly usage credits"];
   if (id.startsWith("weekly_scoped:") && durationSec === WEEK) {
@@ -87,8 +94,9 @@ function window(provider, id, percent, resetsAt, durationSec) {
 }
 
 export function validReading(provider, value) {
-  if (!object(value) || value.source !== "cli" || !epoch(value.observedAt) ||
-    typeof value.account !== "string" || !/^[0-9a-f]{64}$/.test(value.account) ||
+  const host = object(value) && value.source === "host";
+  if (!object(value) || !(host || value.source === "cli") || !epoch(value.observedAt) ||
+    (host ? value.account !== null : typeof value.account !== "string" || !/^[0-9a-f]{64}$/.test(value.account)) ||
     (value.plan !== null && usagePlan(provider, value.plan) === null) ||
     !Array.isArray(value.windows) || value.windows.length === 0 || value.windows.length > MAX_WINDOWS) {
     return null;
@@ -100,6 +108,7 @@ export function validReading(provider, value) {
         (w.durationSec !== null && (!integerIn(w.durationSec, 31 * 86400) || w.durationSec % 60 !== 0))) {
         invalid();
       }
+      if (host && ["frontier_credit", "monthly_spend_limit"].includes(w.id)) invalid();
       if (w.id === "frontier_credit" && (!epoch(w.resetsAt) || w.resetsAt <= value.observedAt ||
         w.resetsAt - value.observedAt > FRONTIER_MAX_RESET)) invalid();
       if (w.id === "monthly_spend_limit" && w.resetsAt !== null) invalid();
@@ -112,7 +121,7 @@ export function validReading(provider, value) {
       return normalized;
     });
     if (new Set(windows.map((w) => w.id)).size !== windows.length) return null;
-    return { observedAt: value.observedAt, source: "cli", account: value.account, plan: value.plan, windows };
+    return { observedAt: value.observedAt, source: value.source, account: value.account, plan: value.plan, windows };
   } catch {
     return null;
   }

@@ -3,17 +3,20 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir } from "node:fs/promises";
 import path from "node:path";
 import { atomicWriteJson, isLockBusyError, withStoreLock } from "../../mods/insights/core/util.mjs";
-import { epoch, object, validReading } from "./normalize.mjs";
+import { epoch, HISTORY, object, STALE, validReading, WIRE_VERSION } from "./normalize.mjs";
+import { readHostRecord, refreshExecutable, runRefresh } from "./host.mjs";
 import { probe } from "./providers.mjs";
 import { cliContext, ProbeError } from "./runtime.mjs";
 
 const NORMAL = 300;
-const STALE = 900;
 const MISSING = 3_600;
 const REFRESH = 30;
-const HISTORY = 14 * 86_400;
 const BACKOFF = 900;
 const MAX_CLOCK_SKEW = 60;
+const HOST_FRESH = 90;
+const HOST_READ_GAP = 60;
+const HOST_REFRESH_MS = 8_000;
+const PROVIDERS = ["codex", "claude", "copilot", "agy"];
 const MAX_STATE = 16 * 1024;
 const MONTHLY_WINDOW = "monthly_spend_limit";
 const FAILURES = new Set(["missing-cli", "auth-expired", "unsupported", "malformed",
@@ -87,9 +90,9 @@ async function validateLock(file) {
   }
 }
 
-async function readState(file, provider, grant) {
+async function readPrivateJson(file) {
   const info = await inspect(file);
-  if (!info) return null;
+  if (!info) return undefined;
   if (!isPrivateFile(info)) invalid();
   const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   let value;
@@ -109,6 +112,12 @@ async function readState(file, provider, grant) {
   } finally {
     await handle.close();
   }
+  return value;
+}
+
+async function readState(file, provider, grant) {
+  const value = await readPrivateJson(file);
+  if (value === undefined) return null;
   if (!object(value) || value.version !== 1 || value.provider !== provider) invalid();
   if (value.grant !== grant) return null;
   if (typeof value.key !== "string" || !/^[0-9a-f]{64}$/.test(value.key) ||
@@ -151,7 +160,7 @@ function accountKey(state, identity) {
 }
 
 function report(provider, binding, status, { state, retryAt = null, reading = null } = {}) {
-  return { version: 1, provider, status, readAt: nowSec(), attemptedAt: state?.attemptedAt ?? null, retryAt, binding, reading };
+  return { version: WIRE_VERSION, provider, status, readAt: nowSec(), attemptedAt: state?.attemptedAt ?? null, retryAt, binding, reading };
 }
 
 const resetPassed = (reading, now) => reading.windows.every((w) =>
@@ -165,13 +174,123 @@ function evidence(reading, now, failure = false) {
   return reading;
 }
 
+async function cliQuota({ file, provider, grant, operation, context, response }) {
+  const state = await readState(file, provider, grant);
+  const current = nowSec();
+  if (state && (state.attemptedAt > current || state.reading?.observedAt > current)) {
+    return response("unavailable");
+  }
+  if (state && current < retryTime(state, operation)) {
+    const retryAt = retryTime(state, operation);
+    const cached = evidence(state.reading, current, state.status !== "fresh");
+    let status = state.status === "fresh" ? (operation === "refresh" ? "cooldown" : "cached") : state.status;
+    if (!cached) return response(status === "cached" ? "cooldown" : status, { state, retryAt });
+    const verified = await probe(provider, context, { identityOnly: true });
+    const account = accountKey(state, verified.identity);
+    if (account !== cached.account) {
+      await atomicWriteJson(file, { ...state, reading: null });
+      return response(verified.status ?? (account ? "identity-changed" : "unavailable"), { state, retryAt });
+    }
+    const checkedAt = nowSec();
+    const reading = evidence(cached, checkedAt, state.status !== "fresh");
+    if (status === "cached" && !reading) status = "unavailable";
+    if (status === "cached" && reading?.source === "history") {
+      status = resetPassed(reading, checkedAt) ? "waiting-reset" : "stale";
+    }
+    return response(status, { state, retryAt, reading });
+  }
+  const next = {
+    version: 1, provider, grant, key: state?.key ?? randomBytes(32).toString("hex"),
+    attemptedAt: current, status: "unavailable",
+    failures: Math.min(6, (state?.failures ?? 0) + 1), reading: state?.reading ?? null,
+  };
+  await atomicWriteJson(file, { ...next, reading: null });
+  const result = await probe(provider, context);
+  const completed = nowSec();
+  if (completed < current || completed - current > MAX_CLOCK_SKEW) return response("unavailable");
+  const account = accountKey(next, result.identity);
+  next.status = result.status ?? "fresh";
+  if (next.status === "fresh") {
+    next.failures = 0;
+    if (!epoch(result.observedAt) || result.observedAt < current || result.observedAt > completed) {
+      return response("unavailable");
+    }
+    const reading = { observedAt: result.observedAt, source: "cli", account, ...result.usage };
+    const expired = resetPassed(reading, completed);
+    // Host-scoped readings without an identity are returned once, never persisted.
+    next.reading = account ? persistedReading(reading) : null;
+    await atomicWriteJson(file, next);
+    return response(expired ? "waiting-reset" : "fresh", {
+      state: next, retryAt: retryTime(next, operation),
+      reading: expired && !account ? null : evidence(reading, completed),
+    });
+  }
+  const sameAccount = account && account === state?.reading?.account;
+  const history = sameAccount ? evidence(next.reading, completed, true) : null;
+  next.reading = history ? persistedReading(state.reading) : null;
+  await atomicWriteJson(file, next);
+  return response(next.status, { state: next, retryAt: retryTime(next, operation), reading: history });
+}
+
+// The host's own refresh cooldown lives beside the provider state and shares its lock.
+async function readHostState(file, provider, grant) {
+  const value = await readPrivateJson(file);
+  if (value === undefined) return null;
+  if (!object(value) || value.version !== 1 || value.provider !== provider || !epoch(value.attemptedAt) ||
+    !Number.isInteger(value.failures) || value.failures < 0 || value.failures > 6) invalid();
+  return value.grant === grant ? value : null;
+}
+
+const hostRetryTime = (state) => state.attemptedAt + Math.max(REFRESH, state.failures > 0
+  ? Math.min(BACKOFF, REFRESH * 2 ** (state.failures - 1)) : 0);
+
+async function hostQuota({ file, provider, grant, operation, context, response }) {
+  const stateFile = file.replace(/\.json$/, ".host.json");
+  let record = await readHostRecord(provider, nowSec());
+  if (record.status !== "ok") return response(record.status);
+  let attemptedAt = nowSec();
+  let retryAt = attemptedAt + HOST_READ_GAP;
+  let fresh = record.current && attemptedAt - record.reading.observedAt < HOST_FRESH;
+  if (operation === "refresh" && !fresh) {
+    const state = await readHostState(stateFile, provider, grant);
+    const executable = await refreshExecutable();
+    if (state && attemptedAt < hostRetryTime(state)) {
+      attemptedAt = state.attemptedAt;
+      retryAt = hostRetryTime(state);
+    } else if (executable) {
+      const next = { version: 1, provider, grant, attemptedAt, failures: Math.min(6, (state?.failures ?? 0) + 1) };
+      // Record the attempt first so a killed helper still counts toward the cooldown.
+      await atomicWriteJson(stateFile, next);
+      await runRefresh(executable, provider, context, HOST_REFRESH_MS);
+      const again = await readHostRecord(provider, nowSec());
+      if (again.status === "ok" && again.reading.observedAt > record.reading.observedAt) {
+        record = again;
+        fresh = record.current;
+        next.failures = 0;
+      }
+      await atomicWriteJson(stateFile, next);
+      retryAt = hostRetryTime(next);
+    } else {
+      retryAt = attemptedAt + REFRESH;
+    }
+  }
+  const status = fresh || (operation === "read" && record.current) ? "fresh" : record.current ? "cached" : "stale";
+  return response(status, { state: { attemptedAt }, retryAt, reading: record.reading });
+}
+
+const currentReading = (r) => r?.reading && ["fresh", "cached", "cooldown"].includes(r.status) &&
+  ["cli", "host"].includes(r.reading.source);
+
 export async function runQuota(operation, provider, binding, { signal } = {}) {
-  if (!["read", "refresh"].includes(operation) || !["codex", "claude"].includes(provider)) {
+  if (!["read", "refresh"].includes(operation) || !PROVIDERS.includes(provider)) {
     throw new TypeError("invalid arguments");
   }
   const response = (status, options) => report(provider, binding, status, options);
+  if (process.platform !== "linux") return response("unsupported");
   // Do not strip an alternate auth selector and silently fall back to a different login.
-  if (process.platform !== "linux" || EXTERNAL_AUTH[provider].some((key) => Object.hasOwn(process.env, key))) {
+  const cliAllowed = EXTERNAL_AUTH[provider]?.every((key) => !Object.hasOwn(process.env, key)) ?? false;
+  // A blocked CLI with no host record has nothing to serve and creates no state.
+  if (EXTERNAL_AUTH[provider] && !cliAllowed && (await readHostRecord(provider, nowSec())).status !== "ok") {
     return response("unsupported");
   }
   const grant = createHash("sha256").update("quota:provider-state:v1\0").update(binding, "hex").digest("hex");
@@ -179,62 +298,21 @@ export async function runQuota(operation, provider, binding, { signal } = {}) {
     const file = await stateFile(provider);
     await validateLock(file);
     return await withStoreLock(file, async () => {
-      const state = await readState(file, provider, grant);
-      const current = nowSec();
-      if (state && (state.attemptedAt > current || state.reading?.observedAt > current)) {
-        return response("unavailable");
+      const options = { file, provider, grant, operation, response,
+        context: cliContext(path.dirname(file), signal) };
+      // Codex asks its CLI first, Claude its host record; host-only providers have no CLI.
+      const order = provider === "codex" ? ["cli", "host"] : provider === "claude" ? ["host", "cli"] : ["host"];
+      const reports = {};
+      for (const source of order) {
+        reports[source] = source === "host" ? await hostQuota(options) :
+          cliAllowed ? await cliQuota(options) : null;
+        // One source per reading: the first current one wins and windows are never merged.
+        if (currentReading(reports[source])) return reports[source];
       }
-      const context = cliContext(path.dirname(file), signal);
-      if (state && current < retryTime(state, operation)) {
-        const retryAt = retryTime(state, operation);
-        const cached = evidence(state.reading, current, state.status !== "fresh");
-        let status = state.status === "fresh" ? (operation === "refresh" ? "cooldown" : "cached") : state.status;
-        if (!cached) return response(status === "cached" ? "cooldown" : status, { state, retryAt });
-        const verified = await probe(provider, context, { identityOnly: true });
-        const account = accountKey(state, verified.identity);
-        if (account !== cached.account) {
-          await atomicWriteJson(file, { ...state, reading: null });
-          return response(verified.status ?? (account ? "identity-changed" : "unavailable"), { state, retryAt });
-        }
-        const checkedAt = nowSec();
-        const reading = evidence(cached, checkedAt, state.status !== "fresh");
-        if (status === "cached" && !reading) status = "unavailable";
-        if (status === "cached" && reading?.source === "history") {
-          status = resetPassed(reading, checkedAt) ? "waiting-reset" : "stale";
-        }
-        return response(status, { state, retryAt, reading });
-      }
-      const next = {
-        version: 1, provider, grant, key: state?.key ?? randomBytes(32).toString("hex"),
-        attemptedAt: current, status: "unavailable",
-        failures: Math.min(6, (state?.failures ?? 0) + 1), reading: state?.reading ?? null,
-      };
-      await atomicWriteJson(file, { ...next, reading: null });
-      const result = await probe(provider, context);
-      const completed = nowSec();
-      if (completed < current || completed - current > MAX_CLOCK_SKEW) return response("unavailable");
-      const account = accountKey(next, result.identity);
-      next.status = result.status ?? "fresh";
-      if (next.status === "fresh") {
-        next.failures = 0;
-        if (!epoch(result.observedAt) || result.observedAt < current || result.observedAt > completed) {
-          return response("unavailable");
-        }
-        const reading = { observedAt: result.observedAt, source: "cli", account, ...result.usage };
-        const expired = resetPassed(reading, completed);
-        // Host-scoped readings without an identity are returned once, never persisted.
-        next.reading = account ? persistedReading(reading) : null;
-        await atomicWriteJson(file, next);
-        return response(expired ? "waiting-reset" : "fresh", {
-          state: next, retryAt: retryTime(next, operation),
-          reading: expired && !account ? null : evidence(reading, completed),
-        });
-      }
-      const sameAccount = account && account === state?.reading?.account;
-      const history = sameAccount ? evidence(next.reading, completed, true) : null;
-      next.reading = history ? persistedReading(state.reading) : null;
-      await atomicWriteJson(file, next);
-      return response(next.status, { state: next, retryAt: retryTime(next, operation), reading: history });
+      const dated = [reports.host, reports.cli].filter((r) => r?.reading);
+      if (dated.length) return dated.reduce((a, b) => b.reading.observedAt > a.reading.observedAt ? b : a);
+      if (reports.host?.status === "unsupported-source") return reports.host;
+      return reports.cli ?? reports.host;
     }, { timeoutMs: 180 });
   } catch (error) {
     if (isLockBusyError(error)) return response("in-flight");

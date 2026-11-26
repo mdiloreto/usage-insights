@@ -2,7 +2,7 @@
 # Fixed shell body for the viewer's enrolled-host launcher; only argv varies.
 [ "$#" -eq 3 ] || exit 64
 case "$1:$2" in
-    read:codex|read:claude|refresh:codex|refresh:claude) ;;
+    read:codex|read:claude|read:copilot|read:agy|refresh:codex|refresh:claude|refresh:copilot|refresh:agy) ;;
     *) exit 64 ;;
 esac
 [ "${#3}" -eq 64 ] || exit 64
