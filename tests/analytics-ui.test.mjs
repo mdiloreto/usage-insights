@@ -959,11 +959,13 @@ test("quota projection stacks by machine and keeps zero, exhaustion, pace, reset
   assert.match(renderedText(renderQuota(hosts, { kind: "remote", name: "missing" }, {}, opts)), /missing.*— No quota reading/);
 });
 
-test("quota sections name Copilot and Antigravity per machine, text-only, with dated history", () => {
+test("quota sections name Copilot and Antigravity per machine with their Herdr icons and dated history", () => {
   const now = Date.now();
   const hosts = [{ name: "linux", label: "Build box", providers: [
     { provider: "copilot", plan: "Enterprise", status: "current", source: "Omarchy collector", observedAtMs: now - 60_000,
       windows: [{ label: "Monthly", usedPercent: 100 }] },
+    { provider: "codex", status: "unobserved", windows: [] },
+    { provider: "claude", status: "unobserved", windows: [] },
     { provider: "agy", status: "stale", reason: "Reading stale", observedAtMs: now - 15 * 86_400_000,
       windows: [], historyWindows: [{ label: "5h", usedPercent: 0 }] },
   ] }];
@@ -977,7 +979,7 @@ test("quota sections name Copilot and Antigravity per machine, text-only, with d
     for (const child of node.childNodes) walk(child);
   };
   walk(block);
-  assert.deepEqual(assets, [], "no logo is invented for providers without one");
+  assert.deepEqual(assets, ["icons/copilot.svg", "mods/insights/logos/openai.svg", "mods/insights/logos/anthropic.svg", "icons/antigravity.svg"]);
 });
 
 test("quota renderer remains visible with no token history and token filters do not alter it", () => {
