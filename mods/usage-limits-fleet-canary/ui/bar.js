@@ -3,6 +3,7 @@ import { Button, HoverCard, Popover, h_flex } from "gpui-base";
 import { DIMMED, divider, levelColor, limitNumberColor, modIcon, providerIcon, sessionNumberColor, usageBar } from "./kit.js";
 import { DENSITY } from "../lib/view.js";
 import { PANEL_CLOSE_DELAY_MS } from "../lib/mod.js";
+import { hostChip } from "../fleet/model.js";
 
 const BAR_W = 30;
 const PANEL_OPEN_DELAY_MS = 350;
@@ -71,7 +72,8 @@ function fleetTrigger(bar, t) {
       .children(labels.map((name, i) => div().min_w(0).flex_shrink(1).child(details(String(i), name, bar, t))));
   }
   return content.children(groups.map((host, i) => h_flex().id(`ul-machine-${i}`).gap(8).items_center().flex_none()
-    .child(div().text_size(10.5).text_color(t.muted).font_semibold().flex_none().whitespace_nowrap().child(host.label))
+    .child(div().text_size(10.5).text_color(t.foreground).font_semibold().flex_none().whitespace_nowrap()
+      .px(5).py(1).rounded(4).border(1).border_color(t.border).child(hostChip(host)))
     .children(host.groups.map((g) => providerGroup(g, density, t, `ul-fleet-provider-${i}`, named !== false)))))
     .child(details("all", null, bar, t));
 }

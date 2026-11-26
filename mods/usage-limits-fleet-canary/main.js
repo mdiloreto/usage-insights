@@ -1,4 +1,5 @@
 import { View } from "gpui-kit";
+import { platform } from "os";
 import { appHome, checking, exec, focused, machines, readTextFile, settings, spaces, terminals, theme, props, shared, setShared, writeTextFile } from "herdr";
 import { PROVIDERS } from "./providers/index.js";
 import { KEY_PREFS, KEY_REFRESH, KEY_STATE, nowS, refreshCooling, states, viewActions } from "./actions.js";
@@ -12,6 +13,7 @@ import { limitsPanel } from "./ui/panel.js";
 import { settingsPanel } from "./ui/settings.js";
 import { fleetBar } from "./fleet/model.js";
 import { focusScope } from "./fleet/selection.js";
+import { createIdentity } from "./fleet/identity.js";
 import { fleetAdapter, refreshOutcome, sharedFleetPrefs } from "./fleet/adapter.js";
 import { coordinatorSource } from "./fleet/coordinator-bridge.js";
 import { createQuotaCoordinator, REVISION_KEY, TICK_MS as QUOTA_TICK_MS } from "./fleet-quota/coordinator.mjs";
@@ -44,6 +46,7 @@ export default class UsageLimits extends View {
     if (!this.checkMode) {
       const source = this.fleetSource(cx);
       if (source) this.fleet = fleetAdapter(source);
+      this.identity = createIdentity({ exec, platform: platform() });
     }
     this.act = viewActions(this);
     this.sessionWas = sessionWanted(this.prefs());
@@ -81,7 +84,14 @@ export default class UsageLimits extends View {
       if (force || nowS() - (this.lastFetchAtS[p.id] ?? 0) >= every) this.fetch(p, cx);
     }
     this.readSession(cx);
+    this.lookUpIdentity(cx);
     cx.notify();
+  }
+
+  lookUpIdentity(cx) {
+    if (!this.fleet || !this.identity) return;
+    const routes = this.fleet.readProjection()?.machines.filter((m) => m.registered === true).map((m) => m.route) ?? [];
+    this.identity.lookup(routes, () => cx.notify());
   }
 
   fetch(p, cx) {
@@ -203,7 +213,7 @@ export default class UsageLimits extends View {
     this.remoteOutcome = refreshOutcome(projection, this.remoteOutcome);
     const now = nowS();
     const st = states();
-    const combined = this.fleet?.model(projection, scope?.activeMachine, prefs, { local: st, now }) ?? null;
+    const combined = this.fleet?.model(projection, scope?.activeMachine, prefs, { local: st, now }, this.identity?.snapshot()) ?? null;
     const numbers = sessionOnBar(this.session?.data, prefs);
     const common = { border: props()?.border, onResize: this.act.resize, onHover: this.act.hover };
     if (combined) {

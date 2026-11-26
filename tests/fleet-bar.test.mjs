@@ -231,3 +231,117 @@ test("the bar drops provider names, keeping icons and segments, before it falls 
   assert.ok(text.includes("mateod-arch") && /100%/.test(text));
   for (const name of ["Claude", "Codex", "Copilot", "Antigravity"]) assert.ok(!text.includes(name), name);
 });
+
+const { createIdentity, cleanName, osFromUname } = await import(`${root}/fleet/identity.js`);
+
+const barText = (fleet) => stub.textOf(stub.nodeOf(statusBar({ fleet, detailsOpen: null, panel: null, border: false,
+  onResize() {}, onHover() {}, toggleDetails() {} }, stub.theme)));
+const chipsFor = (local, remote) => ({ localOs: "Mac", localName: local, remoteOs: () => remote });
+const combinedModel = (identity) => {
+  const projection = project(linuxHost());
+  const adapter = harness(projection, { mode: "combined", selected: { route: "arch", label: "mateod-arch" }, collapsed: [] }).adapter;
+  return adapter.model(projection, null, effectivePrefs(), { local: {}, now: NOW }, identity);
+};
+
+test("each machine starts with an '<OS> · <name>' chip, local and remote", () => {
+  const models = combinedModel(chipsFor("mateos-macbook-pro", "Linux"));
+  assert.deepEqual(models.groups.map((h) => h.chip), ["Mac · mateos-macbook-pro", "Linux · mateod-arch"]);
+  const text = barText(fleetBar(models, 1600, [], true));
+  assert.ok(text.includes("Mac · mateos-macbook-pro") && text.includes("Linux · mateod-arch"));
+  assert.ok(!text.includes("This Computer"));
+  const panelText = stub.textOf(drawPanel(models));
+  assert.ok(panelText.includes("Mac · mateos-macbook-pro") && panelText.includes("Linux · mateod-arch"));
+});
+
+test("chips fall back to the bare name, or 'This Computer', while the lookups are unknown", () => {
+  const unknown = combinedModel({ localOs: "Mac", localName: null, remoteOs: () => null });
+  assert.deepEqual(unknown.groups.map((h) => h.chip), ["This Computer", "mateod-arch"]);
+  assert.deepEqual(combinedModel(undefined).groups.map((h) => h.chip), ["This Computer", "mateod-arch"]);
+});
+
+test("the chip is present at every density, including the labels-only fallback", () => {
+  const models = combinedModel(chipsFor("mateos-macbook-pro", "Linux"));
+  const stages = new Set();
+  for (let width = 60; width <= 2400; width += 4) {
+    const fleet = fleetBar(models, width, [], true);
+    stages.add(fleet.labels ? "labels" : fleet.named === false ? "icons" : "wide");
+    if (fleet.labels) assert.deepEqual(fleet.labels, ["Mac · mateos-macbook-pro", "Linux · mateod-arch"]);
+    else assert.deepEqual(fleet.groups.map((h) => h.chip), ["Mac · mateos-macbook-pro", "Linux · mateod-arch"]);
+    const text = fleet.labels ? fleet.labels.join(" ") : barText(fleet);
+    assert.ok(text.includes("Mac · mateos-macbook-pro") && text.includes("Linux · mateod-arch"), `width ${width}`);
+  }
+  assert.ok(stages.has("labels") && stages.has("icons") && stages.has("wide"));
+});
+
+test("chip names are sanitised", () => {
+  assert.equal(cleanName("  mac-mini \n"), "mac-mini");
+  for (const bad of ["", "   ", "a@b", "bad\u0007name", "x".repeat(33), null, 5]) assert.equal(cleanName(bad), null, String(bad));
+  for (const [platform, os] of [["darwin", "Mac"], ["macos", "Mac"], ["linux", "Linux"], ["win32", "Windows"], ["windows", "Windows"], ["plan9", null]]) {
+    assert.equal(createIdentity({ exec: async () => null, platform }).snapshot().localOs, os, platform);
+  }
+  assert.equal(osFromUname("Darwin\n"), "Mac");
+  assert.equal(osFromUname("Linux"), "Linux");
+  assert.equal(osFromUname("MINGW64_NT-10.0"), "Windows");
+  assert.equal(osFromUname("Plan9"), null);
+});
+
+test("OS and hostname lookups run once per machine and feed the next snapshot", async () => {
+  const calls = [];
+  const exec = async (command, args, options) => {
+    calls.push([command, ...args, options.on ?? "local"]);
+    if (command === "uname") return { code: 0, stdout: "Linux\n", stderr: "" };
+    return { code: 0, stdout: "mateos-macbook-pro\n", stderr: "" };
+  };
+  const identity = createIdentity({ exec, platform: "darwin" });
+  assert.deepEqual(calls, []);
+  assert.equal(identity.snapshot().localOs, "Mac");
+  assert.equal(identity.snapshot().localName, null);
+  let changes = 0;
+  identity.lookup(["arch"], () => { changes += 1; });
+  identity.lookup(["arch"], () => { changes += 1; });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  identity.lookup(["arch"], () => { changes += 1; });
+  assert.deepEqual(calls.map((c) => c.join(" ")).sort(), ["scutil --get LocalHostName local", "uname -s arch"]);
+  assert.equal(identity.snapshot().localName, "mateos-macbook-pro");
+  assert.equal(identity.snapshot().remoteOs("arch"), "Linux");
+  assert.equal(changes, 2);
+  const fleet = fleetBar(combinedModel(identity.snapshot()), 1600, [], true);
+  assert.deepEqual(fleet.groups.map((h) => h.chip), ["Mac · mateos-macbook-pro", "Linux · mateod-arch"]);
+  assert.equal(calls.length, 2, "building and drawing the bar runs no commands");
+});
+
+test("failed lookups are not retried and leave the fallbacks", async () => {
+  let calls = 0;
+  const exec = async () => { calls += 1; throw new Error("unreachable"); };
+  const identity = createIdentity({ exec, platform: "linux" });
+  identity.lookup(["arch"], () => assert.fail("nothing learned"));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  identity.lookup(["arch"], () => assert.fail("nothing learned"));
+  assert.equal(calls, 2);
+  assert.deepEqual([identity.snapshot().localName, identity.snapshot().remoteOs("arch")], [null, null]);
+});
+
+test("local lookups send no 'on' key, and the local name still resolves", async () => {
+  const exec = async (command, args, options) => {
+    if ("on" in options) throw new Error(`unexpected on key for ${command}`);
+    return { code: 0, stdout: "Mateos-MacBook-Pro\n", stderr: "" };
+  };
+  const identity = createIdentity({ exec, platform: "darwin" });
+  identity.lookup([], () => {});
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(identity.snapshot().localName, "Mateos-MacBook-Pro");
+});
+
+test("on macos the local name comes from scutil first", async () => {
+  const calls = [];
+  const exec = async (command) => {
+    calls.push(command);
+    return { code: 0, stdout: command === "scutil" ? "Mateos-MacBook-Pro\n" : "other\n", stderr: "" };
+  };
+  const identity = createIdentity({ exec, platform: "macos" });
+  identity.lookup([], () => {});
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(calls, ["scutil"]);
+  assert.equal(identity.snapshot().localName, "Mateos-MacBook-Pro");
+  assert.equal(identity.snapshot().localOs, "Mac");
+});

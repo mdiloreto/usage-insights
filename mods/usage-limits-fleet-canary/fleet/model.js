@@ -3,8 +3,9 @@ import { effectivePrefs, isShown } from "../lib/prefs.js";
 import { errorReport } from "../lib/report.js";
 import { DENSITY, NO_READING, barModel, cardModel, groupWidth, isStale, sessionNumbersWidth, tightest } from "../lib/view.js";
 import { PROVIDERS, REMOTE_PROVIDERS } from "../providers/index.js";
+import { THIS_COMPUTER, chipText } from "./identity.js";
 
-const thisComputer = "This Computer";
+const NO_IDENTITY = { localOs: null, localName: null, remoteOs: () => null };
 // Not a valid route (routes start with a letter or digit), so it can share the collapsed list with them.
 export const LOCAL_COLLAPSE_KEY = "@local";
 // Copilot and Antigravity appear only where the machine reports them; Claude and Codex always do.
@@ -69,7 +70,7 @@ function remoteStates(machine, now, prefs, providers) {
   }));
 }
 
-export function fleetModels(projection, prefs, selection, localSource) {
+export function fleetModels(projection, prefs, selection, localSource, identity = NO_IDENTITY) {
   const { mode, selected, activeRemote, activeMachine, machines, choices } = selection;
   const now = projection.now;
   const collapsed = new Set(selection.collapsed);
@@ -80,7 +81,7 @@ export function fleetModels(projection, prefs, selection, localSource) {
     const states = remoteStates(machine, now, remotePrefs, providers);
     const groups = compactGroups(states, providers, remotePrefs, now);
     return {
-      route, label, machine, groups, summary: tightSummary(groups), collapsed: collapsed.has(route),
+      route, label, chip: chipText(identity.remoteOs(route), label), machine, groups, summary: tightSummary(groups), collapsed: collapsed.has(route),
       panel: providerDetails(states, providers, remotePrefs, now, true),
       fable: states.claude.fable,
     };
@@ -91,7 +92,7 @@ export function fleetModels(projection, prefs, selection, localSource) {
     ...states.claude, report: withoutFable(states.claude.report), lastGood: withoutFable(states.claude.lastGood),
   } } : states;
   const localGroups = compactGroups(states, PROVIDERS, prefs, localSource.now);
-  const local = { route: null, label: thisComputer, groups: localGroups, summary: tightSummary(localGroups),
+  const local = { route: null, label: THIS_COMPUTER, chip: identity.localName ? chipText(identity.localOs, identity.localName) : THIS_COMPUTER, groups: localGroups, summary: tightSummary(localGroups),
     collapsed: collapsed.has(LOCAL_COLLAPSE_KEY),
     panel: providerDetails(localDetails, PROVIDERS, prefs, localSource.now, false), fable: localFable };
   const remotes = machines.map(forRemote);
@@ -103,7 +104,9 @@ export function fleetModels(projection, prefs, selection, localSource) {
 }
 
 const labelWidth = (label) => Math.ceil(7.5 * label.length + 8);
-const hostWidth = (host, density, named) => labelWidth(host.label) + host.groups.reduce((sum, g) =>
+export const hostChip = (host) => host.chip ?? host.label;
+const CHIP_FRAME = 12;
+const hostWidth = (host, density, named) => labelWidth(hostChip(host)) + CHIP_FRAME + host.groups.reduce((sum, g) =>
   sum + (named ? labelWidth(g.name) : 0) + groupWidth(g, density) + 10 + (g.mark == null ? 0 : 16), 0);
 
 export function fleetBar(models, width, numbers, showBars) {
@@ -120,7 +123,7 @@ export function fleetBar(models, width, numbers, showBars) {
   if (fits(tight, DENSITY.NO_BARS, false)) return { groups: tight, density: DENSITY.NO_BARS, named: false, numbers };
 
   const padding = width >= 250 ? 12 : width >= 96 ? 4 : 0;
-  const labels = groups.map((host) => host.label);
+  const labels = groups.map(hostChip);
   const namedControlsWidth = labels.reduce((sum, name) => sum + labelWidth(name), 0) + 8 * (labels.length - 1);
   return { labels, padding, numbers: width >= namedControlsWidth + 2 * padding + sessionWidth ? numbers : [] };
 }

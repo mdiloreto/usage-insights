@@ -50,7 +50,7 @@ export function fleetAdapter({ readProjection, readPrefs, writePrefs, refresh })
     ({ route, label, registered: false, enabled: false, availability: "unavailable", reason: "Machine not registered" });
   return {
     readProjection,
-    model(projection, activeMachine, prefs, localSource) {
+    model(projection, activeMachine, prefs, localSource, identity) {
       const machines = projection?.machines.filter((m) => m.registered === true) ?? [];
       if (!machines.length) return null;
       const { mode, selected: saved, collapsed } = readPrefs();
@@ -63,7 +63,7 @@ export function fleetAdapter({ readProjection, readPrefs, writePrefs, refresh })
       if (selected && !selected.registered) machines.push(selected);
       const activeRemote = isRoute(activeMachine)
         ? known(machines, activeMachine) ?? missing(activeMachine, activeMachine) : null;
-      return fleetModels(projection, prefs, { mode, selected, activeRemote, activeMachine, machines, choices, collapsed }, localSource);
+      return fleetModels(projection, prefs, { mode, selected, activeRemote, activeMachine, machines, choices, collapsed }, localSource, identity);
     },
     dispatch(intent) {
       if (intent.type === "mode" && (intent.mode === "combined" || intent.mode === "follow")) {

@@ -5,7 +5,7 @@ import { limitsGroup, spendLine } from "./card.js";
 import { providerGroup } from "./bar.js";
 import { inPanel } from "../lib/prefs.js";
 import { canRefreshRemote } from "../fleet/adapter.js";
-import { LOCAL_COLLAPSE_KEY } from "../fleet/model.js";
+import { LOCAL_COLLAPSE_KEY, hostChip } from "../fleet/model.js";
 import { ago, timeLeft } from "../lib/format.js";
 import { chooseDensity } from "../lib/view.js";
 import { providerName } from "../providers/index.js";
@@ -119,10 +119,10 @@ function remoteDetails(remote, panel, selection) {
   const selected = selection.mode === "combined" && selection.selected?.route === route;
   const reason = machine.reason ?? ({ offline: "Machine offline", loading: "Connecting" })[machine.availability]
     ?? (!machine.enabled ? "Remote not enrolled" : machine.availability !== "ready" ? "Machine unavailable" : null);
-  const title = `${label}${selected ? " (selected)" : ""}`;
+  const title = `${hostChip(remote)}${selected ? " (selected)" : ""}`;
   return v_flex().gap(8)
     .child(h_flex().gap(6).items_center()
-      .child(hostToggle(route, collapsed, label, div().flex_1().min_w(0).truncate().font_semibold().child(title), panel))
+      .child(hostToggle(route, collapsed, hostChip(remote), div().flex_1().min_w(0).truncate().font_semibold().child(title), panel))
       .when(!selected && selection.mode === "combined" && selection.choices.includes(machine),
         (r) => r.child(remoteButton(`ul-remote-select-${route}`, "Select", `Select ${label}`, { type: "select", route }, panel))))
     .when(reason != null, (r) => r.child(div().text_size(11).text_color(t.muted).child(reason)))
@@ -168,7 +168,7 @@ export function limitsPanel(model, session, panel, combined = null) {
   const body = panelShell(panel);
   const folded = combined?.local.collapsed === true;
   if (combined) {
-    const { label } = combined.local;
+    const label = hostChip(combined.local);
     const title = div().font_semibold().text_size(11).text_color(t.muted).child(label);
     body.max_h(520).overflow_y_scroll();
     body.child(fleetControls(combined.selection, panel)).child(rule(t))
