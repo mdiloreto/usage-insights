@@ -10,7 +10,7 @@
 - [ ] 2.1 Implement the host-native adapter in `scripts/quota` with fixture tests for a fresh record, symlink, oversize, unknown schema, out-of-range percent, `accounts[]` records and an email in a label. Verify: the new tests fail before the adapter and pass after, and no test touches the real `~/.local/state`.
 - [ ] 2.2 Allow `claude`, `copilot` and `agy` in `main.mjs` and `state.mjs` and add per-provider source selection (host-native, then CLI, then unavailable). Verify: tests cover Claude CLI with no windows plus a fresh record, no record plus a usable CLI, and neither source usable; no mixed-source reading exists.
 - [ ] 2.3 Implement the freshness rules: `limitsFetchedAt` as observation time, `limitsStale` and past-reset handling, future-time rejection. Verify: fixtures for the 15-day-old `agy` record and the stale Codex record show dated history and never a current 0%.
-- [ ] 2.4 Implement targeted refresh for host-native sources as decided for D5. Do not start until the user chooses. Verify: refresh honors the per-provider lock, cooldown and backoff, and reports "no newer reading" when `limitsFetchedAt` does not advance.
+- [ ] 2.4 Implement targeted refresh for host-native sources as decided in D5: reread first, and run the host refresh for that provider only when the record is stale. Verify: a fresh record answers without running the host refresh; a stale one runs it once under the per-provider lock, cooldown and backoff; refresh reports "no newer reading" when `limitsFetchedAt` does not advance.
 - [ ] 2.5 Bump the protocol version and add the viewer mismatch behavior. Verify: a test shows an old viewer and a new helper, and the reverse, both yield quota unavailable with no coordinator write.
 
 ## 3. Viewer and bar
@@ -20,7 +20,7 @@
 - [ ] 3.3 Remove the policy gates from `fleet-provider-visibility` 5.3 and the section 7 follow-up for Claude, Copilot and Antigravity only, keeping every unqualified provider unavailable. Verify: a test shows a host with no qualified source still renders unavailable, and Codex behavior is unchanged.
 - [ ] 3.4 Show the Fable optional window on remote Claude only when the record reports it. Verify: with and without a Fable window, the optional-window setting offers it only in the first case.
 
-## 4. Host changes (explicit user approval required)
+## 4. Host changes (approved by the user on 2026-11-26)
 
 - [ ] 4.1 Add `agy` to `herdr-fleet-quota-refresh` through the installer in the `herdr-fleet-quota` repo. Verify: after the next timer runs, the `agy` record's `limitsFetchedAt` advances; if the sign-in is expired, record that and stop.
 - [ ] 4.2 Upgrade the Linux helper with the enrollment digest unchanged, after saving a rollback copy of the installed helper. Verify: the digest before and after is identical and the old copy still runs a Codex read.

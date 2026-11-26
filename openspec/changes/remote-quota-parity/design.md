@@ -38,9 +38,11 @@ Per provider and host: a fresh host-native record, else the existing CLI probe (
 
 The observation time is `limitsFetchedAt` converted to seconds; `updatedAt`, file mtime and read time never count. A record with `limitsStale` true, a `limitsFetchedAt` older than the helper's stale bound, a missing `limitsFetchedAt`, or `ready` false is not a current reading: it can appear only as dated history within the helper's history bound. A window past `resetsAt` with no newer fetch is expired or waiting, never 0%. A future `limitsFetchedAt` is rejected. These are intended to match the helper's existing `evidence()` rules in `state.mjs`, so the host-native source should reuse that path rather than add a second one; task 2.3 confirms this against the full `state.mjs`. Because a record has no verified account, the stored reading carries no account digest, and the comparison gate from `fleet-provider-visibility` keeps plan against Frontier withheld.
 
-### D5. Targeted refresh for host-native sources (recommended, needs a user decision)
+### D5. Targeted refresh for host-native sources: reread first, fetch only when stale (decided 2026-11-26)
 
-The named detail refresh (`Refresh Linux · Claude`) cannot make the helper call a provider, because the helper makes no network call. Recommended: for a host-native source, refresh runs the host's existing bounded refresh for that one provider (`herdr-fleet-quota-refresh <provider>`) under the helper's per-provider lock, deadline, cooldown and backoff, then rereads the record and reports whether `limitsFetchedAt` advanced. If the command is absent or the fetch time did not advance, refresh reports "no newer reading" with retry timing, never a cached read as new. The alternative is a refresh that only rereads the file. It is simpler and adds no execution, but it cannot bring a stale `agy` record forward. This changes what the helper executes on the host, so it is not implemented until the user decides.
+The named detail refresh (`Refresh Linux · Claude`) first rereads the record and answers at once. If the record is fresh (fetched within the host timer's interval), that reread is the result. If it is stale, the helper also runs the host's existing bounded refresh for that one provider (`herdr-fleet-quota-refresh <provider>`) under its per-provider lock, deadline, cooldown and backoff. Meanwhile details show the dated reading with a refreshing state. The helper then rereads and reports whether `limitsFetchedAt` advanced. If the command is absent, the cooldown applies, or the fetch time did not advance, refresh reports "no newer reading" with retry timing, never a cached read as new.
+
+Why this choice: a reread-only refresh would almost never change anything, because the timer already refreshes every minute, and it could never bring a stale `agy` record forward. A fetch on every click would cost seconds per click (a cold Codex pass measured 48 s) and could trip the provider's rate limit. With the hybrid, a fresh record answers instantly and only a stale one costs a fetch.
 
 ### D6. Protocol version bump
 
@@ -74,10 +76,14 @@ In the `herdr-fleet-quota` repo, change the refresh service's provider list to i
 4. Update only the isolated Mac canary, with a backup as in `fleet-provider-visibility` section 6, and verify in a Linux space.
 5. Roll back by restoring the saved helper copy and the saved canary mods. The enrollment and the Linux grant stay unchanged. The old helper still serves Codex and Claude through the CLI.
 
+## Resolved (2026-11-26)
+
+- "AGI" in the request means Antigravity (`agy` CLI, Omarchy id `agy`).
+- D5: reread first, fetch on the host only when the record is stale.
+- The host changes in tasks group 4 (adding `agy` to the refresh unit, upgrading the Linux helper) are approved.
+
 ## Open Questions
 
-- The request said "AGI". This design assumes it means Antigravity (`agy` CLI, Omarchy id `agy`). Confirm before implementation.
-- D5: should named refresh run the host's refresh command for that provider, or only reread the record?
 - Do hosts without Omarchy need portable Copilot and Antigravity adapters now, or can they stay unavailable?
 - Archive order: `fleet-provider-visibility` must be archived first so these deltas apply to its spec. Is that change ready to archive, given its open tasks 1.3, 2.2, 4.5 and 5.2?
 - Should the helper ever accept an `accounts[]` multi-account record, and if so, how is the account shown without an identifier?
