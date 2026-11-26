@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
 import { test as nodeTest } from "node:test";
-import { parseQuotaReply, projectReading } from "../mods/insights/fleet-quota/protocol.mjs";
+import { parseQuotaReply, projectReading, WIRE_VERSION } from "../mods/insights/fleet-quota/protocol.mjs";
 import { parseFrontierCredit } from "../scripts/quota/frontier.mjs";
 import { runCli } from "../scripts/quota/runtime.mjs";
 
@@ -285,7 +285,7 @@ async function fixture(t, { install = true, useDefault = false, session } = {}) 
     assert.doesNotMatch(withoutMoneyUnit, /\$|531\.73|600\.00|America\/Argentina\/Buenos_Aires/);
     const dto = JSON.parse(res.stdout);
     assert.deepEqual(Object.keys(dto), ["version", "provider", "status", "readAt", "attemptedAt", "retryAt", "binding", "reading"]);
-    assert.equal(dto.version, 1);
+    assert.equal(dto.version, WIRE_VERSION);
     assert.equal(dto.provider, provider);
     assert.ok(dto.binding === requested || (dto.binding === null && ["not-enrolled", "unavailable"].includes(dto.status)));
     assert.ok(!res.stdout.includes(CORE) && !res.stdout.includes(OTHER_CORE));
@@ -308,10 +308,16 @@ test("fixed opt-in launcher reserves 73/74 and invalid argv creates no state", a
   const f = await fixture(t, { install: false });
   const argv = [launch, "read", "codex", WRONG_BINDING];
   assert.equal((await f.command("/bin/sh", argv)).code, 73);
+  for (const provider of ["copilot", "agy"]) {
+    for (const operation of ["read", "refresh"]) {
+      assert.equal((await f.command("/bin/sh", [launch, operation, provider, WRONG_BINDING])).code, 73);
+    }
+  }
   const invalidArgs = [["read", "codex"], ["read", "claude; echo ignored", WRONG_BINDING],
     ["snooze", "claude", WRONG_BINDING], ["read", "codex", WRONG_BINDING, "extra"],
     ["read", "codex", "a".repeat(65)], ["read", "codex", "A".repeat(64)],
-    ["read", "codex", `${"a".repeat(63)}\n`], ["enroll", "codex", WRONG_BINDING], []];
+    ["read", "codex", `${"a".repeat(63)}\n`], ["enroll", "codex", WRONG_BINDING], [],
+    ["read", "gemini", WRONG_BINDING], ["refresh", "cursor", WRONG_BINDING]];
   for (const args of invalidArgs) {
     assert.deepEqual(await f.command("/bin/sh", [launch, ...args]), { code: 64, stdout: "", stderr: "" });
     assert.deepEqual(await f.command(process.execPath, [main, ...args]), { code: 64, stdout: "", stderr: "" });
@@ -344,7 +350,7 @@ test("fixed opt-in launcher reserves 73/74 and invalid argv creates no state", a
 
 function assertDenied(result, status = "not-enrolled") {
   assert.deepEqual(result, {
-    version: 1, provider: "codex", status, readAt: result.readAt,
+    version: WIRE_VERSION, provider: "codex", status, readAt: result.readAt,
     attemptedAt: null, retryAt: null, binding: null, reading: null,
   });
 }
@@ -1303,4 +1309,238 @@ test("parallel invocations share the grant, defer the same provider, and fence r
   await inProgress;
   assert.notEqual(await rotated, old);
   assertDenied(await f.quota("read", "codex", true, old));
+});
+
+const OMARCHY = fileURLToPath(new URL("./fixtures/omarchy/", import.meta.url));
+const HOUR = 3_600;
+
+// Frozen records are rewritten relative to now so freshness is what each test says it is.
+async function record(f, provider, { name = provider, age = 30, resets = true, edit } = {}) {
+  const text = await readFile(path.join(OMARCHY, `${name}.json`), "utf8");
+  const dir = path.join(f.home, ".local/state/omarchy/agents/usage");
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(dir, `${provider}.json`);
+  const value = (() => { try { return JSON.parse(text); } catch { return null; } })();
+  if (!value) {
+    await writeFile(file, text, { mode: 0o600 });
+    return file;
+  }
+  value.limitsFetchedAt = (now() - age) * 1_000;
+  if (resets) {
+    for (const limit of value.limits) {
+      if (limit.resetsAt) limit.resetsAt = new Date((now() + HOUR) * 1_000).toISOString();
+    }
+  }
+  edit?.(value);
+  await writeFile(file, JSON.stringify(value), { mode: 0o600 });
+  return file;
+}
+
+const noCliCalls = (f) => assert.rejects(f.calls(), { code: "ENOENT" });
+
+async function installRefresh(f, { advance = false, mode = 0o700 } = {}) {
+  const script = `#!${process.execPath}
+const fs = require("node:fs");
+const home = process.env.HOME;
+fs.appendFileSync(home + "/refresh-log", process.argv.slice(2).join(" ") + "\\n");
+if (${advance}) {
+  const file = home + "/.local/state/omarchy/agents/usage/" + process.argv[2] + ".json";
+  const value = JSON.parse(fs.readFileSync(file, "utf8"));
+  value.limitsFetchedAt = Date.now();
+  value.limitsStale = false;
+  fs.writeFileSync(file, JSON.stringify(value));
+}
+`;
+  await writeFile(path.join(f.home, ".local/bin/herdr-fleet-quota-refresh"), script, { mode });
+  return async () => {
+    const log = await readFile(path.join(f.home, "refresh-log"), "utf8").catch(() => "");
+    return log.split("\n").filter(Boolean);
+  };
+}
+
+test("Copilot and Antigravity are served from the host record alone, through the launcher too", async (t) => {
+  const f = await fixture(t);
+  assert.equal((await f.quota("read", "copilot")).status, "unavailable");
+  await record(f, "copilot");
+  await record(f, "agy");
+  const copilot = await f.quota("read", "copilot", true);
+  assert.equal(copilot.status, "fresh");
+  assert.equal(copilot.reading.source, "host");
+  assert.equal(copilot.reading.account, null);
+  assert.equal(copilot.reading.plan, "enterprise");
+  assert.deepEqual(copilot.reading.windows.map((w) => [w.id, w.percent, w.durationSec]), [["monthly", 100, null]]);
+  assert.equal(copilot.retryAt - copilot.attemptedAt, 60);
+  const agy = await f.quota("read", "agy");
+  assert.equal(agy.status, "fresh");
+  assert.deepEqual(agy.reading.windows.map((w) => [w.id, w.percent, w.resetsAt]), [["session", 0, null], ["weekly_all", 0, null]]);
+  await noCliCalls(f);
+  const parsed = parseQuotaReply({ code: 0, stdout: JSON.stringify(agy) },
+    { provider: "agy", binding: f.binding, now: now(), sentAt: now() - 5 });
+  assert.equal(parsed.data.reading.source, "host");
+});
+
+test("stale host records are dated and a record past the history bound gives no reading", async (t) => {
+  const f = await fixture(t);
+  await record(f, "agy", { name: "agy-old", age: 5 * 86_400, resets: false });
+  const dated = await f.quota("read", "agy");
+  assert.equal(dated.status, "stale");
+  assert.equal(dated.reading.source, "host");
+  assert.ok(Math.abs(dated.reading.observedAt - (now() - 5 * 86_400)) <= 2);
+  const viewer = parseQuotaReply({ code: 0, stdout: JSON.stringify(dated) },
+    { provider: "agy", binding: f.binding, now: now(), sentAt: now() - 5 });
+  assert.equal(projectReading(viewer.data.reading, now(), true).current, null);
+  await record(f, "agy", { name: "agy-old", age: 15 * 86_400, resets: false });
+  const expired = await f.quota("read", "agy");
+  assert.equal(expired.status, "unavailable");
+  assert.equal(expired.reading, null);
+  await record(f, "codex", { name: "codex-stale", age: 600 });
+  assert.equal((await f.quota("read", "codex")).reading.source, "cli");
+  await rm(path.join(f.bin, "codex"));
+  const codex = await f.quota("read", "codex");
+  assert.equal(codex.status, "stale");
+  assert.equal(codex.reading.source, "host");
+});
+
+test("an unsupported, malformed, linked, oversized or multi-account record is refused without leaking it", async (t) => {
+  const f = await fixture(t);
+  // The CLI answers "unsupported" for every case but a source-version problem, which stays visible.
+  f.data.claude = { rate_limits_available: false };
+  await f.config();
+  for (const [name, status] of [["unknown-schema", "unsupported-source"], ["accounts", "unsupported"],
+    ["out-of-range", "unsupported"], ["malformed", "unsupported"]]) {
+    await record(f, "claude", { name });
+    const got = await f.quota("read", "claude");
+    assert.equal(got.status, status, name);
+    assert.equal(got.reading, null);
+  }
+  const dir = path.join(f.home, ".local/state/omarchy/agents/usage");
+  await rm(path.join(dir, "agy.json"), { force: true });
+  await writeFile(path.join(f.home, "elsewhere.json"), "{}");
+  await symlink(path.join(f.home, "elsewhere.json"), path.join(dir, "agy.json"));
+  assert.equal((await f.quota("read", "agy")).status, "malformed");
+  await rm(path.join(dir, "copilot.json"), { force: true });
+  await writeFile(path.join(dir, "copilot.json"), `${JSON.stringify({ schemaVersion: 1, pad: "x".repeat(70_000) })}\n`, { mode: 0o600 });
+  assert.equal((await f.quota("read", "copilot")).status, "malformed");
+  await record(f, "claude", { name: "email-label" });
+  const labelled = await f.quota("read", "claude");
+  assert.deepEqual(labelled.reading.windows.map((w) => w.id), ["weekly_all"]);
+  assert.doesNotMatch(JSON.stringify(labelled), /@|example/);
+});
+
+test("Claude uses a fresh host record and never starts the CLI", async (t) => {
+  const f = await fixture(t);
+  await record(f, "claude");
+  const got = await f.quota("read", "claude");
+  assert.equal(got.status, "fresh");
+  assert.equal(got.reading.source, "host");
+  assert.equal(got.reading.plan, "max");
+  assert.deepEqual(got.reading.windows.map((w) => [w.id, w.percent]),
+    [["session", 4], ["weekly_all", 8], ["weekly_scoped:Fable", 0]]);
+  await noCliCalls(f);
+});
+
+test("Claude source selection: stale record with CLI, no record with CLI, neither, and a no-window CLI", async (t) => {
+  const f = await fixture(t);
+  await record(f, "claude", { age: 600, edit: (v) => { v.limitsStale = true; } });
+  const cli = await f.quota("read", "claude");
+  assert.equal(cli.status, "fresh");
+  assert.equal(cli.reading.source, "cli");
+  assert.equal(typeof cli.reading.account, "string");
+  // One source per reading: the stale record's 4% session is not mixed into the CLI's.
+  assert.equal(cli.reading.windows.find((w) => w.id === "session").percent, 0);
+  assert.ok((await f.calls()).includes("claude: get_usage"));
+
+  const g = await fixture(t);
+  assert.equal((await g.quota("read", "claude")).reading.source, "cli");
+
+  const h = await fixture(t);
+  h.data.claude = { rate_limits_available: false };
+  await h.config();
+  const neither = await h.quota("read", "claude");
+  assert.equal(neither.status, "unsupported");
+  assert.equal(neither.reading, null);
+  await record(h, "claude", { age: 600, edit: (v) => { v.limitsStale = true; } });
+  const dated = await h.quota("refresh", "claude");
+  assert.equal(dated.status, "stale");
+  assert.equal(dated.reading.source, "host");
+  await record(h, "claude");
+  const current = await h.quota("read", "claude");
+  assert.equal(current.status, "fresh");
+  assert.equal(current.reading.source, "host");
+});
+
+test("Codex asks its CLI first and uses a fresh host record only when the CLI gives nothing", async (t) => {
+  const f = await fixture(t);
+  await record(f, "codex", { name: "codex-stale", age: 30, edit: (v) => { v.limitsStale = false; } });
+  assert.equal((await f.quota("read", "codex")).reading.source, "cli");
+  await rm(path.join(f.bin, "codex"));
+  await f.changeState((s) => { s.attemptedAt -= 3_700; s.reading.observedAt -= 3_700; });
+  const host = await f.quota("read", "codex");
+  assert.equal(host.status, "fresh");
+  assert.equal(host.reading.source, "host");
+  assert.deepEqual(host.reading.windows.map((w) => [w.id, w.percent]), [["codex:primary", 100]]);
+});
+
+test("refresh rereads first and runs the host refresh only for a stale record", async (t) => {
+  const f = await fixture(t);
+  const log = await installRefresh(f, { advance: true });
+  await record(f, "claude");
+  const fresh = await f.quota("refresh", "claude");
+  assert.equal(fresh.status, "fresh");
+  assert.deepEqual(await log(), []);
+
+  await record(f, "claude", { age: 600, edit: (v) => { v.limitsStale = true; } });
+  const before = now();
+  const advanced = await f.quota("refresh", "claude");
+  assert.equal(advanced.status, "fresh");
+  assert.ok(advanced.reading.observedAt >= before - 1);
+  assert.equal(advanced.retryAt - advanced.attemptedAt, 30);
+  assert.deepEqual(await log(), ["claude"]);
+  assert.equal((await f.quota("refresh", "claude")).status, "fresh");
+  assert.deepEqual(await log(), ["claude"]);
+  await noCliCalls(f);
+});
+
+test("a read never runs the host refresh, and without a newer fetch refresh reports the cooldown", async (t) => {
+  const f = await fixture(t);
+  const log = await installRefresh(f);
+  const stale = () => record(f, "copilot", { age: 600, edit: (v) => { v.limitsStale = true; } });
+  await stale();
+  assert.equal((await f.quota("read", "copilot")).status, "stale");
+  assert.deepEqual(await log(), []);
+
+  const first = await f.quota("refresh", "copilot");
+  assert.equal(first.status, "stale");
+  assert.equal(first.retryAt - first.attemptedAt, 30);
+  assert.deepEqual(await log(), ["copilot"]);
+  const again = await f.quota("refresh", "copilot");
+  assert.equal(again.attemptedAt, first.attemptedAt);
+  assert.equal(again.retryAt, first.retryAt);
+  assert.deepEqual(await log(), ["copilot"]);
+
+  const hostState = path.join(f.state, "copilot.host.json");
+  const age = async (seconds) => {
+    const stored = JSON.parse(await readFile(hostState, "utf8"));
+    stored.attemptedAt -= seconds;
+    await writeFile(hostState, JSON.stringify(stored), { mode: 0o600 });
+  };
+  await age(31);
+  const backoff = await f.quota("refresh", "copilot");
+  assert.deepEqual(await log(), ["copilot", "copilot"]);
+  assert.equal(backoff.retryAt - backoff.attemptedAt, 60);
+  assert.equal((await lstat(hostState)).mode & 0o777, 0o600);
+});
+
+test("a missing or unsafe host refresh command is never run", async (t) => {
+  const f = await fixture(t);
+  await record(f, "agy", { age: 600, edit: (v) => { v.limitsStale = true; } });
+  const missing = await f.quota("refresh", "agy");
+  assert.equal(missing.status, "stale");
+  assert.equal(missing.retryAt - missing.attemptedAt, 30);
+  const log = await installRefresh(f, { mode: 0o600 });
+  assert.equal((await f.quota("refresh", "agy")).status, "stale");
+  await chmod(path.join(f.home, ".local/bin/herdr-fleet-quota-refresh"), 0o777);
+  assert.equal((await f.quota("refresh", "agy")).status, "stale");
+  assert.deepEqual(await log(), []);
+  await assert.rejects(access(path.join(f.state, "agy.host.json")), { code: "ENOENT" });
 });

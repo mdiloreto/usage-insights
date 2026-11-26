@@ -1,9 +1,10 @@
 import { BINDING, withVerifiedGrant } from "./grant.mjs";
+import { WIRE_VERSION } from "./normalize.mjs";
 import { runQuota } from "./state.mjs";
 
 const [, , operation, provider, binding, ...rest] = process.argv;
 if (rest.length || !["read", "refresh"].includes(operation) ||
-  !["codex", "claude"].includes(provider) || !BINDING.test(binding)) {
+  !["codex", "claude", "copilot", "agy"].includes(provider) || !BINDING.test(binding)) {
   process.exitCode = 64;
 } else {
   const controller = new AbortController();
@@ -12,7 +13,7 @@ if (rest.length || !["read", "refresh"].includes(operation) ||
   const { report, denial } = await withVerifiedGrant(binding, controller.signal,
     () => runQuota(operation, provider, binding, { signal: controller.signal }));
   const result = report ?? {
-    version: 1, provider, status: denial, readAt: Math.floor(Date.now() / 1_000),
+    version: WIRE_VERSION, provider, status: denial, readAt: Math.floor(Date.now() / 1_000),
     attemptedAt: null, retryAt: null, binding: null, reading: null,
   };
   for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"]) process.off(signal, stop);

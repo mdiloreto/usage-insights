@@ -23,7 +23,7 @@ async function install() {
 
   await mkdir(bundle, { mode: 0o700 }); // Never replace an existing bundle.
   try {
-    for (const file of ["frontier", "grant", "main", "normalize", "providers", "runtime", "state"]
+    for (const file of ["frontier", "grant", "host", "main", "normalize", "providers", "runtime", "state"]
       .map((name) => `scripts/quota/${name}.mjs`).concat("mods/insights/core/util.mjs")) {
       const target = path.join(bundle, file);
       await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });

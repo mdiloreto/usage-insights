@@ -1,7 +1,11 @@
 import { createHash } from "crypto";
 
+// VERSION covers viewer-local state: grants, tombstones, the owner signal and snapshots.
+// WIRE_VERSION is the helper reply version, so a helper and viewer of different eras fail closed.
 export const VERSION = 1;
-export const PROVIDERS = Object.freeze(["codex", "claude"]);
+export const WIRE_VERSION = 2;
+export const PROVIDERS = Object.freeze(["codex", "claude", "copilot", "agy"]);
+const LOCAL_PROVIDERS = PROVIDERS.slice(0, 2);
 export const STALE_SECONDS = 900;
 export const HISTORY_SECONDS = 14 * 86_400;
 const SKEW = 60;
@@ -9,10 +13,12 @@ const WEEK = 604_800;
 const FRONTIER_MAX_RESET = 62 * 86_400;
 const STATUS = new Set(["fresh", "cached", "cooldown", "in-flight", "waiting-reset",
   "stale", "paused", "estimated", "missing-cli", "auth-expired", "unsupported", "malformed",
-  "rate-limited", "timeout", "unavailable", "identity-changed"]);
+  "rate-limited", "timeout", "unavailable", "identity-changed", "unsupported-source"]);
 const PLANS = {
   codex: new Set(["free", "go", "plus", "pro", "prolite", "team", "business", "enterprise", "edu"]),
   claude: new Set(["free", "pro", "max", "team", "enterprise"]),
+  copilot: new Set(["free", "pro", "pro+", "business", "enterprise"]),
+  agy: new Set(["free", "pro", "ultra"]),
 };
 const SCOPES = new Set(["Opus", "Sonnet", "Haiku", "Fable", "Cowork"]);
 const MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ");
@@ -57,7 +63,7 @@ export function readGrants(value) {
   for (const row of value) {
     if (!object(row) || row.version !== VERSION || !safeRoute(row.route) || grants.has(row.route) ||
       !matches(CORE_ID, row.generation) || !matches(DIGEST, row.coreDigest) ||
-      !matches(DIGEST, row.binding) || !Array.isArray(row.providers) || row.providers.length > 2 ||
+      !matches(DIGEST, row.binding) || !Array.isArray(row.providers) || row.providers.length > PROVIDERS.length ||
       new Set(row.providers).size !== row.providers.length || row.providers.some((p) => !PROVIDERS.includes(p))) return null;
     if (row.enabled !== true && row.enabled !== false) return null;
     const invalidated = row.invalidated ?? null;
@@ -102,8 +108,10 @@ function windowLabels(provider, id, duration) {
     const prefix = bucket === "spark" ? "Spark" : `Bucket ${n}`;
     return [`${prefix} ${short}`, `${prefix} · ${long}`];
   }
+  if (provider === "copilot") return id === "monthly" && duration === null ? ["mo", "Monthly"] : null;
   if (id === "session" && duration === 18_000) return ["5h", "5-hour"];
   if (id === "weekly_all" && duration === WEEK) return ["wk", "Weekly"];
+  if (provider === "agy") return null;
   if (id === "frontier_credit" && duration === null) return ["Frontier credit", "Frontier credit"];
   if (id === "monthly_spend_limit" && duration === null) return ["Monthly usage credits", "Monthly usage credits"];
   const scope = id.startsWith("weekly_scoped:") ? id.slice(14) : null;
@@ -160,7 +168,7 @@ function parseWindows(provider, value, local) {
 }
 
 // The only returned diagnostic values are fixed codes, never stderr or rejection text.
-export function parseQuotaReply(result, { provider, binding, now, sentAt }) {
+export function parseQuotaReply(result, { provider, binding, now, sentAt, wire = WIRE_VERSION }) {
   if (!PROVIDERS.includes(provider) || !matches(DIGEST, binding) || !epoch(now) || !epoch(sentAt)) {
     return { reason: "malformed" };
   }
@@ -169,7 +177,7 @@ export function parseQuotaReply(result, { provider, binding, now, sentAt }) {
   if ((result?.stdout === "" || result?.stdout == null) && result?.code === 74) return { reason: "helper-unsafe" };
   if (result?.code !== 0) return { reason: "transport-unknown" };
   const data = parseJson(result.stdout, 32 * 1024);
-  if (!object(data) || data.version !== VERSION || data.provider !== provider) return { reason: "malformed" };
+  if (!object(data) || data.version !== wire || data.provider !== provider) return { reason: "malformed" };
   const { status, readAt, attemptedAt, retryAt } = data;
   if (data.binding === null && (status === "not-enrolled" || status === "unavailable") &&
     attemptedAt === null && retryAt === null && data.reading === null &&
@@ -188,21 +196,24 @@ export function parseQuotaReply(result, { provider, binding, now, sentAt }) {
   }
   const r = data.reading;
   if (!object(r) || !epoch(r.observedAt) || attemptedAt === null || r.observedAt > readAt ||
-    !["cli", "history"].includes(r.source) ||
+    !["cli", "history", "host"].includes(r.source) ||
     !optional(r.account, (v) => matches(DIGEST, v)) ||
-    (r.account === null && (status !== "fresh" || r.source !== "cli")) ||
-    (status === "fresh" && (r.source !== "cli" || r.observedAt < attemptedAt ||
+    // A host record has no verifiable account; only it and a fresh one-shot CLI reading may omit one.
+    (r.source === "host" ? r.account !== null || !["fresh", "cached", "stale"].includes(status) :
+      r.account === null && (status !== "fresh" || r.source !== "cli")) ||
+    (status === "fresh" && (!["cli", "host"].includes(r.source) ||
+      (r.source === "cli" && r.observedAt < attemptedAt) ||
       attemptedAt < sentAt - SKEW || readAt - attemptedAt > SKEW)) ||
     (r.source === "cli" && !["fresh", "cached", "cooldown"].includes(status)) ||
     ["identity-changed", "in-flight", "paused", "estimated"].includes(status) ||
     !optional(r.plan, (p) => PLANS[provider].has(p))) return { reason: "malformed" };
   const windows = parseWindows(provider, r.windows, false);
-  if (!windows || windows.some((w) =>
+  if (!windows || (r.source === "host" && windows.some((w) => w.kind !== "plan")) || windows.some((w) =>
     (w.id === "monthly_spend_limit" && r.account === null) ||
     (w.id === "frontier_credit" && (r.account === null || !epoch(w.resetsAt) ||
       w.resetsAt <= r.observedAt || w.resetsAt - r.observedAt > FRONTIER_MAX_RESET)))) return { reason: "malformed" };
   return { data: { status, readAt, attemptedAt, retryAt,
-    reading: { observedAt: r.observedAt, source: r.source, historyEligible: r.account !== null, plan: r.plan, windows } } };
+    reading: { observedAt: r.observedAt, source: r.source, historyEligible: r.account !== null || r.source === "host", plan: r.plan, windows } } };
 }
 
 export function projectReading(reading, now, current) {
@@ -210,7 +221,7 @@ export function projectReading(reading, now, current) {
   if (!reading || age < 0 || age >= HISTORY_SECONDS) return { current: null, history: null };
   const view = (windows) => ({ observedAt: reading.observedAt, source: reading.source,
     plan: reading.plan, windows: windows.map((w) => ({ ...w, ...(w.money ? { money: { ...w.money } } : {}) })) });
-  const inline = current && reading.source === "cli" && age < STALE_SECONDS ?
+  const inline = current && ["cli", "host"].includes(reading.source) && age < STALE_SECONDS ?
     reading.windows.filter((w) => w.resetsAt === null || w.resetsAt > now) : [];
   const past = reading.historyEligible ? reading.windows.filter((w) => !inline.includes(w)) : [];
   return { current: inline.length ? view(inline) : null,
@@ -218,7 +229,7 @@ export function projectReading(reading, now, current) {
 }
 
 export function projectLocal(state, now) {
-  return PROVIDERS.map((provider) => {
+  return LOCAL_PROVIDERS.map((provider) => {
     const local = state?.[provider];
     const native = local?.report?.status === "ok" ? local.report : local?.lastGood;
     const source = provider === "codex" ? "codex app-server" : "claude CLI";

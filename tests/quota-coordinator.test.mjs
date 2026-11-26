@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createQuotaCoordinator, EXEC_TIMEOUT_MS, FLIGHT_MS, LAUNCHER, LEASE_MS,
   REVISION_KEY as OWNER_KEY, REGISTRY_TIMEOUT_MS, TICK_MS } from "../mods/insights/fleet-quota/coordinator.mjs";
-import { fingerprintCore, parseMachineRegistry, parseQuotaReply } from "../mods/insights/fleet-quota/protocol.mjs";
+import { fingerprintCore, parseMachineRegistry, parseQuotaReply, projectReading, readGrants, STALE_SECONDS, WIRE_VERSION } from "../mods/insights/fleet-quota/protocol.mjs";
 import { insightQuotaHosts } from "../mods/insights/quota-projection.mjs";
 
 const T0 = 1_795_410_000;
@@ -30,7 +30,7 @@ const win = (id, percent, durationSec, resetsAt) => ({ id, percent, durationSec,
   short: "FORGED LABEL", long: "never expose wire labels" });
 const CLAUDE_MONEY = { currency: "$", usedMinor: 53_173, limitMinor: 60_000, resetLabel: "Dec 1" };
 function report(now, provider = "codex", patch = {}) {
-  return { version: 1, provider, status: "fresh", readAt: now, attemptedAt: now, retryAt: now + 300,
+  return { version: WIRE_VERSION, provider, status: "fresh", readAt: now, attemptedAt: now, retryAt: now + 300,
     binding: BINDING, reading: { source: "cli", observedAt: now, account: ACCOUNT,
       plan: provider === "codex" ? "plus" : "max",
       windows: provider === "codex" ?
@@ -124,7 +124,7 @@ test("parser enforces the fixed wire, checks times/bounds/statuses and projects 
   assert.deepEqual(valid.reading.windows.map(({ short, percent }) => [short, percent]), [["5h", 0], ["wk", 100]]);
   assert.equal(parse(reply({ ...good, binding: "a".repeat(64) })).reason, "binding-mismatch");
   assert.equal(parse(reply({ ...good, binding: null })).reason, "binding-mismatch");
-  assert.equal(parse(reply({ ...good, version: 2 })).reason, "malformed");
+  assert.equal(parse(reply({ ...good, version: 1 })).reason, "malformed");
   assert.equal(parse(reply({ ...good, provider: "claude" })).reason, "malformed");
   assert.equal(parse(reply({ ...good, readAt: T0 + 61 })).reason, "malformed");
   assert.equal(parse(reply({ ...good, retryAt: T0 + 3_601 })).reason, "malformed");
@@ -642,4 +642,112 @@ test("local projection consumes existing native state without launching probes o
   assert.deepEqual(a.snapshot().local[1].current.windows, [localWindow]);
   assert.equal(JSON.stringify(a.snapshot()).includes("don't publish"), false);
   assert.deepEqual(f.calls, []);
+});
+
+function hostReport(now, provider = "copilot", patch = {}) {
+  const windows = {
+    copilot: [win("monthly", 100, null, now + 3_600)],
+    agy: [win("session", 0, 18_000, null), win("weekly_all", 0, 604_800, null)],
+    claude: [win("session", 4, 18_000, now + 120), win("weekly_all", 8, 604_800, now + 3_600),
+      win("weekly_scoped:Fable", 0, 604_800, now + 3_600)],
+  }[provider];
+  return { version: WIRE_VERSION, provider, status: "fresh", readAt: now, attemptedAt: now, retryAt: now + 60,
+    binding: BINDING, reading: { source: "host", observedAt: now - 20, account: null,
+      plan: { copilot: "enterprise", agy: "pro", claude: "max" }[provider], windows }, ...patch };
+}
+
+test("a host reading carries no account, only plan windows, and is accepted for fresh, cached and stale", () => {
+  const parse = (r, provider = "copilot") => parseQuotaReply(reply(r), { provider, binding: BINDING, now: T0, sentAt: T0 });
+  const good = parse(hostReport(T0)).data;
+  assert.equal(good.reading.source, "host");
+  assert.equal(good.reading.historyEligible, true);
+  assert.deepEqual(good.reading.windows.map(({ id, short, long, kind }) => [id, short, long, kind]),
+    [["monthly", "mo", "Monthly", "plan"]]);
+  for (const status of ["fresh", "cached", "stale"]) {
+    assert.equal(parse(hostReport(T0, "copilot", { status })).data.status, status);
+  }
+  assert.deepEqual(parse(hostReport(T0, "agy"), "agy").data.reading.windows.map((w) => w.short), ["5h", "wk"]);
+  assert.deepEqual(parse(hostReport(T0, "claude"), "claude").data.reading.windows.map((w) => w.long),
+    ["5-hour", "Weekly", "Weekly · Fable"]);
+
+  const bad = (patch, readingPatch = {}) => parse({ ...hostReport(T0), ...patch,
+    reading: { ...hostReport(T0).reading, ...readingPatch } });
+  assert.equal(bad({}, { account: ACCOUNT }).reason, "malformed");
+  for (const status of ["cooldown", "waiting-reset", "rate-limited", "in-flight"]) {
+    assert.equal(bad({ status }).reason, "malformed", status);
+  }
+  assert.equal(bad({}, { plan: "mystery" }).reason, "malformed");
+  assert.equal(bad({}, { windows: [win("session", 1, 18_000, null)] }).reason, "malformed");
+  for (const id of ["frontier_credit", "monthly_spend_limit"]) {
+    const kind = { ...win(id, 1, null, id === "frontier_credit" ? T0 + 300 : null), money: CLAUDE_MONEY };
+    assert.equal(parseQuotaReply(reply({ ...hostReport(T0, "claude"), reading: {
+      ...hostReport(T0, "claude").reading, windows: [kind] } }),
+    { provider: "claude", binding: BINDING, now: T0, sentAt: T0 }).reason, "malformed", id);
+  }
+  // History keeps requiring an account; a hostless history reading is not a host reading.
+  assert.equal(bad({ status: "stale" }, { source: "history" }).reason, "malformed");
+});
+
+test("host readings are current while recent and become history afterwards; CLI rules are unchanged", () => {
+  const parsed = parseQuotaReply(reply(hostReport(T0)), { provider: "copilot", binding: BINDING, now: T0, sentAt: T0 }).data.reading;
+  const view = (now, current = true) => projectReading(parsed, now, current);
+  assert.deepEqual(view(T0).current.windows.map((w) => w.id), ["monthly"]);
+  assert.equal(view(T0).history, null);
+  const later = view(T0 - 20 + STALE_SECONDS);
+  assert.equal(later.current, null);
+  assert.equal(later.history.source, "history");
+  assert.equal(view(T0, false).current, null);
+  assert.equal(view(T0 + 14 * 86_400).history, null);
+  const reset = { ...parsed, windows: [{ ...parsed.windows[0], resetsAt: T0 - 1 }] };
+  assert.equal(projectReading(reset, T0, true).current, null);
+  assert.equal(projectReading(reset, T0, true).history.windows.length, 1);
+});
+
+test("grants accept four providers and a version-1 grant is extended by changing only its providers", () => {
+  const row = grant("linux", A, GENERATION, ["codex", "claude"]);
+  const old = readGrants([row]).get("linux");
+  const widened = { ...row, providers: ["codex", "claude", "copilot", "agy"] };
+  const next = readGrants([widened]).get("linux");
+  assert.deepEqual(next.providers, ["agy", "claude", "codex", "copilot"]);
+  for (const field of ["route", "generation", "coreDigest", "binding", "enabled"]) assert.equal(next[field], old[field]);
+  assert.equal(readGrants([{ ...row, providers: ["codex", "claude", "copilot", "agy", "codex"] }]), null);
+  assert.equal(readGrants([{ ...row, providers: ["gemini"] }]), null);
+});
+
+test("a viewer and a helper on different wire versions fail closed in both directions", async () => {
+  const args = { provider: "copilot", binding: BINDING, now: T0, sentAt: T0 };
+  const current = hostReport(T0);
+  assert.equal(parseQuotaReply(reply(current), args).data.status, "fresh");
+  // New viewer, old helper.
+  assert.deepEqual(parseQuotaReply(reply({ ...current, version: 1 }), args), { reason: "malformed" });
+  // Old viewer, new helper: the same reply under the previous version.
+  assert.deepEqual(parseQuotaReply(reply(current), { ...args, wire: 1 }), { reason: "malformed" });
+
+  const f = fixture();
+  f.enrollment = [grant("linux", A, GENERATION, ["copilot"])];
+  const copy = f.copy();
+  f.quota = (_, provider) => reply({ ...hostReport(f.now(), provider), version: 1 });
+  await f.boot(copy);
+  const row = remote(copy, "copilot");
+  assert.equal(row.status, "unavailable");
+  assert.equal(row.reason, "malformed");
+  assert.deepEqual([row.current, row.history], [null, null]);
+  assert.deepEqual([...f.shared.keys()], [OWNER_KEY]);
+  assert.deepEqual(Object.keys(f.shared.get(OWNER_KEY)).sort(), ["revision", "version"]);
+});
+
+test("a remote host reading projects as an Omarchy collector reading for every provider", async () => {
+  const f = fixture();
+  f.enrollment = [grant("linux", A, GENERATION, ["claude", "copilot", "agy"])];
+  const copy = f.copy();
+  f.quota = (_, provider) => reply(hostReport(f.now(), provider));
+  await f.boot(copy);
+  const hosts = insightQuotaHosts(copy.snapshot(), "This Computer", f.now() * 1_000);
+  const linux = hosts.find((host) => host.name === "linux");
+  assert.deepEqual(linux.providers.map((p) => [p.provider, p.status, p.source]),
+    [["codex", "unavailable", null], ["claude", "current", "Omarchy collector"],
+      ["copilot", "current", "Omarchy collector"], ["agy", "current", "Omarchy collector"]]);
+  assert.equal(copy.snapshot().remotes[0].providers.every(({ refreshable }) => typeof refreshable === "boolean"), true);
+  // The local list stays Codex and Claude: Copilot and Antigravity have no local collector here.
+  assert.deepEqual(copy.snapshot().local.map((p) => p.provider), ["codex", "claude"]);
 });
