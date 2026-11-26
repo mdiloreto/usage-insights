@@ -24,19 +24,19 @@
 
 - [x] 4.1 Add `agy` to `herdr-fleet-quota-refresh` through the installer in the `herdr-fleet-quota` repo. Verify: after the next timer runs, the `agy` record's `limitsFetchedAt` advances; if the sign-in is expired, record that and stop.
 - [x] 4.2 Upgrade the Linux helper with the enrollment digest unchanged, after saving a rollback copy of the installed helper. Verify: the digest before and after is identical and the old copy still runs a Codex read.
-- [ ] 4.3 Space Claude probes in `herdr-fleet-quota-refresh` (150 s after a success; Anthropic returns 429 to about one 60 s probe in two, which republishes the record stale) and run `agy` through a quota-only adapter (a cold local-stats scan measured 90 s and 3.8 GB every 15 min). Keep the "only a measurement stamped during this invocation confirms new quota" rule. Verify: an hour of the journal shows no Claude 429 at the new spacing, and the timer run no longer peaks above a few hundred MB.
+- [x] 4.3 Space Claude probes in `herdr-fleet-quota-refresh` (150 s after a success; Anthropic returns 429 to about one 60 s probe in two, which republishes the record stale) and run `agy` through a quota-only adapter (a cold local-stats scan measured 90 s and 3.8 GB every 15 min). Keep the "only a measurement stamped during this invocation confirms new quota" rule. Verify: an hour of the journal shows no Claude 429 at the new spacing, and the timer run no longer peaks above a few hundred MB.
 
 ## 5. Canary verification
 
 - [x] 5.1 Run the candidate in a disposable app home with fixtures. Verify: Follow Space in a fixture Linux space shows each provider's expected windows and the fixture's stale `agy` as dated history.
-- [ ] 5.2 Update the Mac canary with a backup. Verify: in a Linux space Follow Space shows Claude 5h and weekly (and Fable when reported), Copilot monthly, `agy` session and weekly, and Codex, matching the Linux host's records within the same minute.
+- [x] 5.2 Update the Mac canary with a backup. Verify: in a Linux space Follow Space shows Claude 5h and weekly (and Fable when reported), Copilot monthly, `agy` session and weekly, and Codex, matching the Linux host's records within the same minute.
 - [x] 5.3 Demonstrate rollback. Verify: restoring the saved canary and helper returns the previous display, the enrollment digest is unchanged, and the Local bar is unaffected.
 
 ## 6. Finish
 
 - [x] 6.1 Run `npm test` and `npm run check`. Verify: both pass with the output recorded.
-- [ ] 6.2 Simplify the diff. Verify: tests still pass after the pass.
-- [ ] 6.3 Verify in a fresh subagent that did not write the code, given only this spec and the branch. Verify: each requirement and scenario is checked with a pass or a named gap.
+- [x] 6.2 Simplify the diff. Verify: tests still pass after the pass.
+- [x] 6.3 Verify in a fresh subagent that did not write the code, given only this spec and the branch. Verify: each requirement and scenario is checked with a pass or a named gap.
 - [ ] 6.4 Archive `fleet-provider-visibility` before this change so the deltas apply to its spec. Verify: `fleet-provider-quotas` exists in the main specs before this change is archived.
 
 ## 7. Follow-ups
