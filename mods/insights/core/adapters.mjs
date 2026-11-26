@@ -894,11 +894,37 @@ function parseCodex(record, ctx) {
     }
     state.pendingTwin = null;
     const context = codexContext(state, asString(payload.turn_id, ""));
+    const last = isPlainObject(info.last_token_usage) ? info.last_token_usage : null;
+    // Per-response counting from toolkit#165 (MIT, © Gagan Devagiri), only while
+    // no token_usage_record has been read. last_token_usage is this response's own
+    // usage, so interleaved counters and totals inherited from a parent do not
+    // inflate it. Once records exist a token_count is their echo: counting it by
+    // last_token_usage would count a response twice whenever the two fail to
+    // pair, so the delta minus pending record usage applies instead. Counts read
+    // before the first record are not revisited, so a line counts the same in an
+    // appended scan and in a copy of the rollout.
+    const perResponse = !state.modern && Boolean(totals && last);
     let raw;
     let identityTail;
     let reset = false;
 
-    if (totals) {
+    if (perResponse) {
+      const current = codexRawTotals(totals);
+      // An unmoved total reports no new response: a re-emission, or just after a
+      // fork boundary a repeat of the parent's last one (toolkit#165 counts it).
+      const previous = state.legacyTotals;
+      const unmoved = isPlainObject(previous)
+        && Object.keys(current).every((key) => current[key] === previous[key]);
+      raw = unmoved ? {} : last;
+      state.legacyTotals = current;
+      // No timestamp: a later re-emission of the same response must dedupe.
+      identityTail = [
+        "legacy-response",
+        asString(payload.turn_id ?? payload.root_turn_id, ""),
+        ...Object.values(current),
+        ...Object.values(codexRawTotals(last)),
+      ];
+    } else if (totals) {
       const current = codexRawTotals(totals);
       const previous = isPlainObject(state.legacyTotals)
         ? state.legacyTotals
@@ -920,8 +946,8 @@ function parseCodex(record, ctx) {
         current.output_tokens,
         current.reasoning_output_tokens,
       ];
-    } else if (isPlainObject(info.last_token_usage)) {
-      raw = info.last_token_usage;
+    } else if (last) {
+      raw = last;
       identityTail = [
         "legacy-last",
         record.timestamp ?? ctx.lineHash,
@@ -940,12 +966,12 @@ function parseCodex(record, ctx) {
     if (totals) {
       cumulative = codexCumulativeVector(totals);
       const pending = codexPendingTokens(state);
-      if (!reset) tokens = codexSubtract(tokens, pending);
+      if (!reset && !perResponse) tokens = codexSubtract(tokens, pending);
       state.modernPending = codexZeroTokens();
     }
     if (!tokens.nonzero) return;
 
-    let dedupKey = state.forkReplay && asString(payload.response_id, "")
+    let dedupKey = (state.forkReplay || perResponse) && asString(payload.response_id, "")
       ? makeDedupKey("codex", "response", payload.response_id)
       : makeDedupKey("codex", session, ...identityTail);
     const observationKey = dedupKey;

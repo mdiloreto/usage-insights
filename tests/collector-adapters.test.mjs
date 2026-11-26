@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -583,6 +583,34 @@ test("Codex echo arriving long after its token_usage_record is not counted again
 
 test("Codex echoes whose running total fell behind the records are not counted again", async () => {
   assert.equal(totalTokens(await codexRows("codex-offset-counter.jsonl")), 660);
+});
+
+test("Codex fork does not count a repeat of the parent's last total after the boundary", async () => {
+  assert.equal(totalTokens(await codexRows("codex-fork-repeated-total.jsonl")), 100);
+});
+
+// Counts read before the first record stay per response, so a line counts the
+// same in an appended scan and in a copy: 100 and 50 by last_token_usage, then
+// the record's 40.
+test("Codex counts before the first token_usage_record are per response, also when appended or copied", async () => {
+  const context = await env();
+  const target = path.join(context.home, ".codex/sessions/rollout.jsonl");
+  await mkdir(path.dirname(target), { recursive: true });
+  const lines = (await readFile(path.join(fixtures, "codex-records-part-way.jsonl"), "utf8")).trimEnd().split("\n");
+  await writeFile(target, `${lines.slice(0, 4).join("\n")}\n`);
+  const before = await configure(context, [
+    { id: "codex", label: "Codex", adapter: "codex", enabled: true, roots: ["~/.codex/sessions"] },
+  ]);
+  assert.equal(totalTokens(before.rows), 150);
+  const rescan = async () => {
+    const result = await run(["snapshot", "--store", context.store, "--home", context.home]);
+    assert.equal(result.code, 0, result.stderr);
+    return totalTokens(JSON.parse(result.stdout).rows);
+  };
+  await appendFile(target, `${lines.slice(4).join("\n")}\n`);
+  assert.equal(await rescan(), 190);
+  await copyFile(target, path.join(path.dirname(target), "rollout-copy.jsonl"));
+  assert.equal(await rescan(), 190);
 });
 
 test("Custom declarative mapping: role filter, max revisions, harness/provider/model, duration", async () => {

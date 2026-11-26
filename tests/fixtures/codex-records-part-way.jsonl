@@ -1,0 +1,6 @@
+{"type":"session_meta","timestamp":"2026-03-11T10:00:00.000Z","payload":{"id":"codex-records-part-way","cwd":"/repo/part-way","model_provider":"openai"}}
+{"type":"turn_context","timestamp":"2026-03-11T10:00:01.000Z","payload":{"turn_id":"turn-1","model":"m","cwd":"/repo/part-way"}}
+{"type":"event_msg","timestamp":"2026-03-11T10:00:02.000Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":0},"last_token_usage":{"input_tokens":100,"output_tokens":0}}}}
+{"type":"event_msg","timestamp":"2026-03-11T10:00:03.000Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":0},"last_token_usage":{"input_tokens":50,"output_tokens":0}}}}
+{"type":"token_usage_record","timestamp":"2026-03-11T10:00:04.000Z","payload":{"response_id":"resp-1","turn_id":"turn-1","usage":{"input_tokens":40,"output_tokens":0},"thread_token_usage":{"input_tokens":340,"output_tokens":0}}}
+{"type":"event_msg","timestamp":"2026-03-11T10:00:05.000Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":340,"output_tokens":0},"last_token_usage":{"input_tokens":40,"output_tokens":0}}}}
