@@ -6,7 +6,11 @@ import { G, card, cardHeader, fieldLabel, mutedText } from "./ui.js";
 const PROVIDERS = new Map([
   ["codex", { label: "Codex", icon: "openai.svg" }],
   ["claude", { label: "Claude", icon: "anthropic.svg" }],
+  // No suitable logo ships in mods/insights/logos, so these sections are text-only.
+  ["copilot", { label: "Copilot", icon: null }],
+  ["agy", { label: "Antigravity", icon: null }],
 ]);
+const LOGO_SIZE = 12;
 const METER_WIDTH = 64;
 
 function validPercent(value) {
@@ -66,7 +70,9 @@ function quotaProvider(record, provider, c, now) {
   const hasWindows = windows.length + history.length > 0;
   return h_flex().w_full().items_center().flex_wrap().gap(G.sm)
     .child(h_flex().min_w(132).items_center().gap(G.xs)
-      .child(svg(`mods/insights/logos/${provider.icon}`).size(12).text_color(c.mutedForeground))
+      .child(provider.icon
+        ? svg(`mods/insights/logos/${provider.icon}`).size(LOGO_SIZE).text_color(c.mutedForeground)
+        : div().w(LOGO_SIZE).flex_none())
       .child(fieldLabel(provider.label, c))
       .when(Boolean(record.plan), (el) => el.child(mutedText(record.plan, c))))
     .when(record.planUnavailable === true, (el) => el.child(mutedText("Plan windows unavailable", c)))
