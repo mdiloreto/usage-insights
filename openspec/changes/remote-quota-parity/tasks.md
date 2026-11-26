@@ -1,9 +1,12 @@
 ## 1. Reproduce and evidence
 
 - [x] 1.1 Reproduce the gap on the Mac canary twice: in a Linux space the bar shows Claude `—`, no Copilot and no Antigravity. Record the date and the exact bar and details text. Verify: two dated captures with the same text, and the host records read on the same day.
-- [ ] 1.2 Run the installed helper read for `claude` over the existing exec path and record its safe status and whether it returns windows. Verify: the status is recorded and no credential, raw output or path is in the capture.
+- [x] 1.2 Run the installed helper read for `claude` over the existing exec path and record its safe status and whether it returns windows. Verify: the status is recorded and no credential, raw output or path is in the capture.
+  - 2026-11-26, before: the old helper's Claude CLI state was `unavailable` with no reading and 6 failures (CLI `get_usage` returns no windows on Linux), so the Mac showed `Claude —`.
+  - 2026-11-26, after: the host record projects as `ok`, current, windows `session` 55, `weekly_all` 14, `weekly_scoped:Fable` 0; the Mac shows `Claude 5h 55% · wk 14% · Fable 0%`, source "Omarchy collector".
 - [x] 1.3 Freeze sanitized fixtures from the four Omarchy records (`claude`, `copilot`, `agy`, `codex`), including the stale `agy` record and the `limitsStale` Codex record, plus malformed, symlink, oversize, unknown-schema and email-in-label variants. Verify: a scan of the fixtures finds no email, account id, token or home path.
-- [ ] 1.4 Record how the Mac's native `usage-limits` labels and icons Copilot and Antigravity locally, as the parity target. Verify: the notes list icon, window labels and tooltip text for each, with the date.
+- [x] 1.4 Record how the Mac's native `usage-limits` labels and icons Copilot and Antigravity locally, as the parity target. Verify: the notes list icon, window labels and tooltip text for each, with the date.
+  - 2026-11-26: the Mac's native `usage-limits` has no local Copilot or Antigravity provider (only Claude, Codex, OpenCode, pi), so there is no local rendering to copy. The parity target is Herdr's built-in logos (`icons/copilot.svg`, `icons/antigravity.svg`), names "Copilot" and "Antigravity", short labels `mo` and `5h`/`wk`, and the per-machine refresh label "Refresh <machine> · <provider>", which the bar and the Insights panel now share.
 
 ## 2. Helper
 
@@ -38,6 +41,7 @@
 - [x] 6.2 Simplify the diff. Verify: tests still pass after the pass.
 - [x] 6.3 Verify in a fresh subagent that did not write the code, given only this spec and the branch. Verify: each requirement and scenario is checked with a pass or a named gap.
 - [ ] 6.4 Archive `fleet-provider-visibility` before this change so the deltas apply to its spec. Verify: `fleet-provider-quotas` exists in the main specs before this change is archived.
+  - Blocked on the owner (2026-11-26): `fleet-provider-visibility` still has open tasks 1.3, 2.2, 4.5 and 5.2, and 4.5 and 5.2 require human review, so archiving it now would close those reviews without them.
 
 ## 7. Follow-ups
 
