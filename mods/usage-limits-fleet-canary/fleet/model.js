@@ -35,8 +35,8 @@ function compactGroups(states, providers, prefs, now) {
 const remoteSource = (report, now) => report?.status === "ok" ? `${report.source} · ${ago(report.observedAt, now)}` : null;
 
 // One compact segment per provider (the tightest window), shown on a collapsed machine header.
-const tightSummary = (groups) => groups.filter((g) => g.spend == null)
-  .map((g) => ({ ...g, segments: g.tight ? [g.tight] : [] }));
+const tightGroup = (g) => ({ ...g, segments: g.tight ? [g.tight] : [] });
+const tightSummary = (groups) => groups.filter((g) => g.spend == null).map(tightGroup);
 
 function providerDetails(states, providers, prefs, now, remote) {
   const panel = cardModel(states, now, providers, prefs);
@@ -114,9 +114,7 @@ export function fleetBar(models, width, numbers, showBars) {
   const fits = (hosts, density, named = true) => hosts.reduce((sum, host) => sum + hostWidth(host, density, named) + 8, 0) <= room;
   if (showBars && fits(groups, DENSITY.FULL)) return { groups, density: DENSITY.FULL, numbers };
   if (fits(groups, DENSITY.NO_BARS)) return { groups, density: DENSITY.NO_BARS, numbers };
-  const tight = groups.map((host) => ({ ...host, groups: host.groups.map((g) => ({
-    ...g, segments: g.tight ? [g.tight] : [],
-  })) }));
+  const tight = groups.map((host) => ({ ...host, groups: host.groups.map(tightGroup) }));
   if (fits(tight, DENSITY.NO_BARS)) return { groups: tight, density: DENSITY.NO_BARS, numbers };
   // Icons identify the provider, as in the local bar, once the names no longer fit.
   if (fits(tight, DENSITY.NO_BARS, false)) return { groups: tight, density: DENSITY.NO_BARS, named: false, numbers };

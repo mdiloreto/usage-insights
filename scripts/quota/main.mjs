@@ -1,10 +1,10 @@
 import { BINDING, withVerifiedGrant } from "./grant.mjs";
 import { WIRE_VERSION } from "./normalize.mjs";
-import { runQuota } from "./state.mjs";
+import { PROVIDERS, runQuota } from "./state.mjs";
 
 const [, , operation, provider, binding, ...rest] = process.argv;
 if (rest.length || !["read", "refresh"].includes(operation) ||
-  !["codex", "claude", "copilot", "agy"].includes(provider) || !BINDING.test(binding)) {
+  !PROVIDERS.includes(provider) || !BINDING.test(binding)) {
   process.exitCode = 64;
 } else {
   const controller = new AbortController();

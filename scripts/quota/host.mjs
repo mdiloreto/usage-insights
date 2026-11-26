@@ -20,6 +20,7 @@ const SCOPED = /^(Opus|Sonnet|Haiku|Fable|Cowork) Weekly$/;
 const MONTHLY = /^Monthly allowance$/;
 
 const malformed = () => { throw new ProbeError("malformed"); };
+const unreadable = (status) => ({ status, reading: null, current: false });
 
 function classify(entry) {
   for (const text of [entry.label, entry.title]) {
@@ -91,21 +92,21 @@ export function parseHostRecord(provider, text, now) {
     let record;
     try { record = JSON.parse(text); } catch { malformed(); }
     if (!object(record)) malformed();
-    if (record.schemaVersion !== SCHEMA_VERSION) return { status: "unsupported-source", reading: null, current: false };
+    if (record.schemaVersion !== SCHEMA_VERSION) return unreadable("unsupported-source");
     if (record.id !== provider || typeof record.ready !== "boolean" || typeof record.limitsStale !== "boolean") malformed();
     if (record.accounts !== undefined) {
       if (!Array.isArray(record.accounts)) malformed();
-      if (record.accounts.length) return { status: "unsupported", reading: null, current: false };
+      if (record.accounts.length) return unreadable("unsupported");
     }
     const { limitsFetchedAt } = record;
     if (typeof limitsFetchedAt !== "number" || !Number.isFinite(limitsFetchedAt) || limitsFetchedAt <= 0) {
-      return { status: "unavailable", reading: null, current: false };
+      return unreadable("unavailable");
     }
     const observedAt = Math.floor(limitsFetchedAt / 1_000);
     if (!epoch(observedAt)) malformed();
     const windows = limits(provider, record.limits);
-    if (observedAt > now || now - observedAt >= HISTORY) return { status: "unavailable", reading: null, current: false };
-    if (!windows.length) return { status: "unsupported", reading: null, current: false };
+    if (observedAt > now || now - observedAt >= HISTORY) return unreadable("unavailable");
+    if (!windows.length) return unreadable("unsupported");
     const reading = validReading(provider, { observedAt, source: "host", account: null,
       plan: planOf(provider, record.tierLabel), windows });
     if (!reading) malformed();
@@ -113,7 +114,7 @@ export function parseHostRecord(provider, text, now) {
       !reading.windows.every((w) => w.resetsAt !== null && w.resetsAt <= now);
     return { status: "ok", reading, current };
   } catch (error) {
-    if (error instanceof ProbeError) return { status: "malformed", reading: null, current: false };
+    if (error instanceof ProbeError) return unreadable("malformed");
     throw error;
   }
 }
@@ -134,11 +135,11 @@ export async function readHostRecord(provider, now, dir = null) {
     const file = path.join(dir ?? await usageDirectory(), `${provider}.json`);
     try { handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
     catch (error) {
-      return { status: error.code === "ELOOP" ? "malformed" : "unavailable", reading: null, current: false };
+      return unreadable(error.code === "ELOOP" ? "malformed" : "unavailable");
     }
     const info = await handle.stat();
     if (!info.isFile() || info.uid !== process.geteuid() || (info.mode & 0o022) !== 0 || info.size > MAX_RECORD) {
-      return { status: "malformed", reading: null, current: false };
+      return unreadable("malformed");
     }
     const data = Buffer.alloc(MAX_RECORD + 1);
     let read = 0;
@@ -147,10 +148,10 @@ export async function readHostRecord(provider, now, dir = null) {
       if (!bytesRead) break;
       read += bytesRead;
     }
-    if (read > MAX_RECORD) return { status: "malformed", reading: null, current: false };
+    if (read > MAX_RECORD) return unreadable("malformed");
     return parseHostRecord(provider, data.toString("utf8", 0, read), now);
   } catch (error) {
-    if (error instanceof ProbeError) return { status: "unavailable", reading: null, current: false };
+    if (error instanceof ProbeError) return unreadable("unavailable");
     throw error;
   } finally {
     await handle?.close();
@@ -179,12 +180,11 @@ export function runRefresh(executable, provider, context, maxMs) {
     };
     const done = (ok) => {
       clearTimeout(timer);
-      context.signal?.removeEventListener("abort", abort);
+      context.signal?.removeEventListener("abort", killGroup);
       resolve(ok);
     };
-    const abort = () => { killGroup(); };
-    const timer = setTimeout(abort, remaining);
-    context.signal?.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(killGroup, remaining);
+    context.signal?.addEventListener("abort", killGroup, { once: true });
     child.once("error", () => done(false));
     child.once("close", (code) => { killGroup(); done(code === 0); });
   });
