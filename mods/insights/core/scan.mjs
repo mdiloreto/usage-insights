@@ -32,7 +32,7 @@ import {
 const CHUNK_BYTES = 256 * 1024;
 const MAX_WARNINGS = 50;
 const MAX_TRAVERSAL_ENTRIES = 250_000;
-const PARSER_VERSIONS = { pi: 3, codex: 5, claude: 2, antigravity: 2 };
+const PARSER_VERSIONS = { pi: 3, codex: 6, claude: 2, antigravity: 2 };
 const PROGRESS_CHUNK_INTERVAL = 64;
 
 export class ScanStopError extends Error {
@@ -74,6 +74,7 @@ function warningSink(warnings, stats, sourceState) {
     },
     note(message) {
       if (warnings.length < MAX_WARNINGS) warnings.push(message);
+      else hidden += 1;
     },
     finish() {
       if (hidden > 0 && !reportedHidden) {
@@ -1019,6 +1020,18 @@ async function scanOpenCodeDb(store, source, filePath, sink, stats, options = {}
   return { dirty: true, aborted: false };
 }
 
+// From GaganSD/coding-agent-toolkit#131 (MIT, © Gagan Devagiri): usage excluded
+// or uncertain at a fork boundary is reported instead of dropped silently.
+function noteCodexForkReplay(entry, sink, { pending = false } = {}) {
+  if (entry?.adapter !== "codex") return;
+  if (entry.state.forkBoundaryAmbiguous || (entry.state.forkReplay && !pending)) {
+    sink.note(`codex ${entry.path}: fork replay usage excluded until a strictly newer UUIDv7 turn; missing, non-v7 or equal-millisecond boundaries may exclude child usage.`);
+  }
+  if (entry.state.forkUsageAmbiguous) {
+    sink.note(`codex ${entry.path}: copied usage carriers lack a reliable shared identity; fork accounting may be inaccurate.`);
+  }
+}
+
 async function scanOneFile(store, source, filePath, sink, stats, options = {}) {
   const sourceSink = {
     warn(message) {
@@ -1067,6 +1080,7 @@ async function scanOneFile(store, source, filePath, sink, stats, options = {}) {
     && existing.mtimeMs === fileStat.mtimeMs
   ) {
     stats.unchangedFiles += 1;
+    noteCodexForkReplay(existing, sourceSink);
     return { dirty: false, aborted: false };
   }
 
@@ -1135,6 +1149,7 @@ async function scanOneFile(store, source, filePath, sink, stats, options = {}) {
     ) {
       stats.unchangedFiles += 1;
       commitStoreTransaction(tx);
+      noteCodexForkReplay(entry, sourceSink);
       return { dirty, aborted: false };
     }
 
@@ -1205,6 +1220,7 @@ async function scanOneFile(store, source, filePath, sink, stats, options = {}) {
       if (parserVersion) entry.state[parserKey] = parserVersion;
       delete entry.state.zstdError;
       delete entry.state.scanPending;
+      noteCodexForkReplay(entry, sourceSink);
       return { dirty, aborted: false };
     }
 
@@ -1232,6 +1248,7 @@ async function scanOneFile(store, source, filePath, sink, stats, options = {}) {
       entry.mtimeMs = fileStat.mtimeMs;
       delete entry.state.scanPending;
     }
+    noteCodexForkReplay(entry, sourceSink, { pending: plain.pending });
     return { dirty, aborted: false, pending: plain.pending };
   } catch (error) {
     rollbackStoreTransaction(tx);
