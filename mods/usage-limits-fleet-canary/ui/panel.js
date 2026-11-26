@@ -1,10 +1,14 @@
-import { div } from "gpui-kit";
+import { div, svg } from "gpui-kit";
 import { Button, h_flex, v_flex } from "gpui-base";
-import { SESSION_TITLE, iconButton, levelColor, rule, sessionNumberColor, usageBar } from "./kit.js";
+import { SESSION_TITLE, iconButton, levelColor, modIcon, rule, sessionNumberColor, usageBar } from "./kit.js";
 import { limitsGroup, spendLine } from "./card.js";
+import { providerGroup } from "./bar.js";
 import { inPanel } from "../lib/prefs.js";
 import { canRefreshRemote } from "../fleet/adapter.js";
+import { LOCAL_COLLAPSE_KEY } from "../fleet/model.js";
 import { ago, timeLeft } from "../lib/format.js";
+import { chooseDensity } from "../lib/view.js";
+import { providerName } from "../providers/index.js";
 
 const PANEL_W = 340;
 const SESSION_BAR_W = 60;
@@ -71,7 +75,7 @@ function fleetControls(selection, panel) {
     .when(mode === "combined" && !selected && choices.length > 1, (r) => r.child(status("Choose a remote")))
     .when(panel.remoteOutcome != null, (r) => {
       const { label, provider, status: outcome, reason, retryAt } = panel.remoteOutcome;
-      const name = provider === "claude" ? "Claude" : "Codex";
+      const name = providerName(provider);
       const message = ({ accepted: "Refresh queued", busy: "Refresh in progress", fresh: "Reading current" })[outcome] ?? `Refresh ${outcome}`;
       const retry = retryAt > panel.now ? `Retry in ${timeLeft(retryAt - panel.now)}` : null;
       return r.child(status([label ? `${label} · ${name}: ${message}` : message, reason, retry].filter(Boolean).join(" · ")));
@@ -94,8 +98,23 @@ function measuredDetails(rows, { t, now }) {
     }));
 }
 
+function hostToggle(key, collapsed, label, title, panel) {
+  const { t } = panel;
+  return h_flex().id(`ul-host-toggle-${key}`).gap(4).items_center().flex_1().min_w(0).cursor_pointer()
+    .tooltip(`${collapsed ? "Expand" : "Collapse"} ${label}`)
+    .on_click((_e, cx) => panel.onRemoteIntent({ type: "collapse", key }, cx))
+    .child(svg(modIcon(collapsed ? "chevron-right" : "chevron-down")).size(12).flex_none().text_color(t.dim))
+    .child(title);
+}
+
+function hostSummary(host, key, panel) {
+  const density = chooseDensity({ groups: host.summary }, PANEL_W - 24, false);
+  return h_flex().gap(10).items_center().flex_wrap().pl(16)
+    .children(host.summary.map((g) => providerGroup(g, density, panel.t, `ul-sum-${key}`, false)));
+}
+
 function remoteDetails(remote, panel, selection) {
-  const { label, route, machine } = remote;
+  const { label, route, machine, collapsed } = remote;
   const { t } = panel;
   const selected = selection.mode === "combined" && selection.selected?.route === route;
   const reason = machine.reason ?? ({ offline: "Machine offline", loading: "Connecting" })[machine.availability]
@@ -103,11 +122,12 @@ function remoteDetails(remote, panel, selection) {
   const title = `${label}${selected ? " (selected)" : ""}`;
   return v_flex().gap(8)
     .child(h_flex().gap(6).items_center()
-      .child(div().flex_1().min_w(0).truncate().font_semibold().tooltip(title).child(title))
+      .child(hostToggle(route, collapsed, label, div().flex_1().min_w(0).truncate().font_semibold().child(title), panel))
       .when(!selected && selection.mode === "combined" && selection.choices.includes(machine),
         (r) => r.child(remoteButton(`ul-remote-select-${route}`, "Select", `Select ${label}`, { type: "select", route }, panel))))
     .when(reason != null, (r) => r.child(div().text_size(11).text_color(t.muted).child(reason)))
-    .children(remote.panel.groups.map((g) => {
+    .when(collapsed, (r) => r.child(hostSummary(remote, route, panel)))
+    .when(!collapsed, (r) => r.children(remote.panel.groups.map((g) => {
       const refresh = `Refresh ${label} · ${g.name}`;
       const measurements = g.providerId === "claude" ? machine.states?.claude?.measurements : null;
       return v_flex().gap(4)
@@ -117,17 +137,11 @@ function remoteDetails(remote, panel, selection) {
         .when(measurements?.length > 0, (r) => r.child(measuredDetails(measurements, panel)))
         .child(remoteButton(`ul-remote-refresh-${route}-${g.providerId}`, refresh, refresh,
           { type: "refresh", route, provider: g.providerId }, panel, canRefreshRemote(machine, g.providerId)));
-    }));
+    })));
 }
 
-export function limitsPanel(model, session, panel, combined = null) {
+function localSections(body, model, session, panel, combined) {
   const { t } = panel;
-  const body = panelShell(panel);
-  const hostLabel = (label) => div().font_semibold().text_size(11).text_color(t.muted).child(label);
-  if (combined) {
-    body.max_h(520).overflow_y_scroll();
-    body.child(fleetControls(combined.selection, panel)).child(rule(t)).child(hostLabel(combined.local.label));
-  }
   const sessionInPanel = inPanel(panel.prefs, "session");
   if (session) body.child(sessionBlock(session, t)).child(rule(t));
   if (sessionInPanel && (panel.sessionScope === "remote" || (combined && panel.sessionScope === "unknown"))) {
@@ -147,6 +161,21 @@ export function limitsPanel(model, session, panel, combined = null) {
         .on_click((_e, cx) => panel.refreshLocal(g.providerId, cx)).child(refresh));
     }
   });
+}
+
+export function limitsPanel(model, session, panel, combined = null) {
+  const { t } = panel;
+  const body = panelShell(panel);
+  const folded = combined?.local.collapsed === true;
+  if (combined) {
+    const { label } = combined.local;
+    const title = div().font_semibold().text_size(11).text_color(t.muted).child(label);
+    body.max_h(520).overflow_y_scroll();
+    body.child(fleetControls(combined.selection, panel)).child(rule(t))
+      .child(h_flex().items_center().child(hostToggle(LOCAL_COLLAPSE_KEY, folded, label, title, panel)));
+    if (folded) body.child(hostSummary(combined.local, LOCAL_COLLAPSE_KEY, panel));
+  }
+  if (!folded) localSections(body, model, session, panel, combined);
   if (combined) {
     for (const remote of combined.remotes) body.child(rule(t)).child(remoteDetails(remote, panel, combined.selection));
   }

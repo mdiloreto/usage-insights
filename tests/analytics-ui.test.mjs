@@ -959,6 +959,27 @@ test("quota projection stacks by machine and keeps zero, exhaustion, pace, reset
   assert.match(renderedText(renderQuota(hosts, { kind: "remote", name: "missing" }, {}, opts)), /missing.*— No quota reading/);
 });
 
+test("quota sections name Copilot and Antigravity per machine, text-only, with dated history", () => {
+  const now = Date.now();
+  const hosts = [{ name: "linux", label: "Build box", providers: [
+    { provider: "copilot", plan: "Enterprise", status: "current", source: "Omarchy collector", observedAtMs: now - 60_000,
+      windows: [{ label: "Monthly", usedPercent: 100 }] },
+    { provider: "agy", status: "stale", reason: "Reading stale", observedAtMs: now - 15 * 86_400_000,
+      windows: [], historyWindows: [{ label: "5h", usedPercent: 0 }] },
+  ] }];
+  const block = renderQuota(hosts, { kind: "remote", name: "linux" }, {}, { localLabel: "This Computer", now });
+  const text = renderedText(block);
+  assert.match(text, /Build box.*Copilot Enterprise.*Monthly.*100%.*Omarchy collector.*Antigravity.*5h \(dated\).*0% used/);
+  const assets = [];
+  const walk = (node) => {
+    if (typeof node !== "object" || !node) return;
+    assets.push(...node.calls.filter(([method]) => method === "asset").map(([, args]) => args[0]));
+    for (const child of node.childNodes) walk(child);
+  };
+  walk(block);
+  assert.deepEqual(assets, [], "no logo is invented for providers without one");
+});
+
 test("quota renderer remains visible with no token history and token filters do not alter it", () => {
   const state = useHerdr();
   state.machines = [{ name: null }, { name: "linux" }];
