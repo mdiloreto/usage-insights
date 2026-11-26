@@ -2,7 +2,7 @@
 
 ### Requirement: Read host-native provider records
 
-For an allowlisted provider, the helper MAY read the owning host's Omarchy usage record (`~/.local/state/omarchy/agents/usage/<id>.json`) as a quota source. The read SHALL be read-only, open only a regular file that is not a symbolic link, enforce a size bound, and accept only `schemaVersion` 1. A record with any other or missing schema version SHALL yield unavailable with the reason "unsupported source version". The helper SHALL sanitize provider ids and window labels, strip labels that contain `@`, bound the number and size of windows, and convert the record's 0–1 `percent` fraction to the projection's 0–100 scale without rounding. No account id, email, path, token or raw record SHALL cross the helper boundary. Host-native records carry no verifiable account binding for this purpose, so their readings SHALL be attributed to the machine and provider only, and same-account comparisons (plan against Frontier) SHALL stay withheld.
+For an allowlisted provider, the helper MAY read the owning host's Omarchy usage record (`~/.local/state/omarchy/agents/usage/<id>.json`) as a quota source. The read SHALL be read-only, open only a regular file that is not a symbolic link, enforce a size bound, and accept only `schemaVersion` 1. A record with any other or missing schema version SHALL yield unavailable with the reason "unsupported source version". The helper SHALL sanitize provider ids and window labels, strip labels that contain `@`, bound the number and size of windows, and convert the record's 0–1 `percent` fraction to the projection's integer 0–100 scale, rounding down below 100 so a window with capacity left never reads as 100%. No account id, email, path, token or raw record SHALL cross the helper boundary. Host-native records carry no verifiable account binding for this purpose, so their readings SHALL be attributed to the machine and provider only, and same-account comparisons (plan against Frontier) SHALL stay withheld.
 
 #### Scenario: Read a fresh host-native record
 
@@ -71,6 +71,20 @@ In a remote space, Follow Space SHALL show the providers the host has qualified,
 
 - **WHEN** the host's records are unchanged between two reads in the same minute
 - **THEN** the remote bar and details show the same percentages the host's records contain
+
+### Requirement: Collapse and expand each machine in the details
+
+The expanded details SHALL group quotas under one header per machine (This Computer and each remote), in the same format as today's details. Each header SHALL toggle between expanded and collapsed. A collapsed header SHALL still show a one-line summary of each provider's tightest current window for that machine. Collapsed state SHALL persist per machine route, and all machines SHALL start expanded.
+
+#### Scenario: Collapse the Linux machine
+
+- **WHEN** the user clicks the Linux header in the details
+- **THEN** its provider rows hide, the header keeps a one-line summary such as `Claude wk 8% · Codex wk 100% · Copilot mo 100%`, and This Computer stays expanded
+
+#### Scenario: Reopen the details later
+
+- **WHEN** the details are closed and opened again
+- **THEN** each machine keeps the collapsed or expanded state it had
 
 ### Requirement: Date stale host-native readings
 
