@@ -2,10 +2,13 @@ import { ago } from "../lib/format.js";
 import { effectivePrefs, isShown } from "../lib/prefs.js";
 import { errorReport } from "../lib/report.js";
 import { DENSITY, NO_READING, barModel, cardModel, groupWidth, isStale, sessionNumbersWidth, tightest } from "../lib/view.js";
-import { PROVIDERS } from "../providers/index.js";
+import { PROVIDERS, REMOTE_PROVIDERS } from "../providers/index.js";
 
-const quotaProviders = PROVIDERS.filter((p) => p.kind !== "spend");
 const thisComputer = "This Computer";
+// Not a valid route (routes start with a letter or digit), so it can share the collapsed list with them.
+export const LOCAL_COLLAPSE_KEY = "@local";
+// Copilot and Antigravity appear only where the machine reports them; Claude and Codex always do.
+const providersFor = (machine) => REMOTE_PROVIDERS.filter((p) => !p.optional || machine.states?.[p.id]);
 const current = (w, now) => Number.isFinite(w.percent) && w.percent >= 0 && w.percent <= 100
   && (w.resetsAt == null || w.resetsAt > now);
 export const isFable = (w) => /^weekly_scoped:fable$/i.test(w.id);
@@ -29,11 +32,17 @@ function compactGroups(states, providers, prefs, now) {
   });
 }
 
+const remoteSource = (report, now) => report?.status === "ok" ? `${report.source} · ${ago(report.observedAt, now)}` : null;
+
+// One compact segment per provider (the tightest window), shown on a collapsed machine header.
+const tightSummary = (groups) => groups.filter((g) => g.spend == null)
+  .map((g) => ({ ...g, segments: g.tight ? [g.tight] : [] }));
+
 function providerDetails(states, providers, prefs, now, remote) {
   const panel = cardModel(states, now, providers, prefs);
   for (const group of panel.groups) {
     const { report, lastGood, historyDetail } = states[group.providerId] ?? {};
-    group.source = (report?.status === "ok" ? report : lastGood)?.source;
+    group.source = remote ? remoteSource(report, now) : (report?.status === "ok" ? report : lastGood)?.source;
     const history = remote ? historyDetail?.windows.filter((w) => !isFable(w) || fableEnabled(prefs)) : null;
     if (history?.length) {
       group.history = `Past reading (${ago(historyDetail.observedAt, now)}): ${history.map((w) => `${w.short} ${w.percent}%`).join(" · ")}`;
@@ -43,8 +52,8 @@ function providerDetails(states, providers, prefs, now, remote) {
   return panel;
 }
 
-function remoteStates(machine, now, prefs) {
-  return Object.fromEntries(quotaProviders.map(({ id }) => {
+function remoteStates(machine, now, prefs, providers) {
+  return Object.fromEntries(providers.map(({ id }) => {
     const state = machine.states?.[id];
     const windows = machine.enabled && machine.availability === "ready" ? currentWindows(state, now) : [];
     const reason = machine.reason ?? state?.report?.message ?? (machine.availability === "offline" ? "Machine offline" : "No current reading");
@@ -63,13 +72,16 @@ function remoteStates(machine, now, prefs) {
 export function fleetModels(projection, prefs, selection, localSource) {
   const { mode, selected, activeRemote, activeMachine, machines, choices } = selection;
   const now = projection.now;
+  const collapsed = new Set(selection.collapsed);
   const remotePrefs = effectivePrefs({ showResetTime: prefs.showResetTime, hiddenWindows: prefs.hiddenWindows.filter(isFablePreference) });
   const forRemote = (machine) => {
     const { route, label } = machine;
-    const states = remoteStates(machine, now, remotePrefs);
+    const providers = providersFor(machine);
+    const states = remoteStates(machine, now, remotePrefs, providers);
+    const groups = compactGroups(states, providers, remotePrefs, now);
     return {
-      route, label, machine, groups: compactGroups(states, quotaProviders, remotePrefs, now),
-      panel: providerDetails(states, quotaProviders, remotePrefs, now, true),
+      route, label, machine, groups, summary: tightSummary(groups), collapsed: collapsed.has(route),
+      panel: providerDetails(states, providers, remotePrefs, now, true),
       fable: states.claude.fable,
     };
   };
@@ -78,7 +90,9 @@ export function fleetModels(projection, prefs, selection, localSource) {
   const localDetails = states.claude && !(localFable && fableEnabled(prefs)) ? { ...states, claude: {
     ...states.claude, report: withoutFable(states.claude.report), lastGood: withoutFable(states.claude.lastGood),
   } } : states;
-  const local = { route: null, label: thisComputer, groups: compactGroups(states, PROVIDERS, prefs, localSource.now),
+  const localGroups = compactGroups(states, PROVIDERS, prefs, localSource.now);
+  const local = { route: null, label: thisComputer, groups: localGroups, summary: tightSummary(localGroups),
+    collapsed: collapsed.has(LOCAL_COLLAPSE_KEY),
     panel: providerDetails(localDetails, PROVIDERS, prefs, localSource.now, false), fable: localFable };
   const remotes = machines.map(forRemote);
   const groupFor = (machine) => remotes.find(({ route }) => route === machine.route) ?? forRemote(machine);

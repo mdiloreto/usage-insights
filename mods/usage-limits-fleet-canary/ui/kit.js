@@ -1,5 +1,5 @@
 import { div, image, svg } from "gpui-kit";
-import { PROVIDERS } from "../providers/index.js";
+import { ALL_PROVIDERS } from "../providers/index.js";
 import { MOD } from "../lib/mod.js";
 
 export const NO_READING = "—";
@@ -11,7 +11,7 @@ const ICON_SIZE = 13;
 
 export const modIcon = (name) => `mods/${MOD}/icons/${name}.svg`;
 
-const ONE_COLOR_GLYPHS = new Set(PROVIDERS.filter((p) => p.oneColorGlyph).map((p) => p.id));
+const ONE_COLOR_GLYPHS = new Set(ALL_PROVIDERS.filter((p) => p.oneColorGlyph).map((p) => p.id));
 
 export function providerIcon(id, path, color) {
   return ONE_COLOR_GLYPHS.has(id) ? svg(path).size(ICON_SIZE).text_color(color) : image(path).size(ICON_SIZE);

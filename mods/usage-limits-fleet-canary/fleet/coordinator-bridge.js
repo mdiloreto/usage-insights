@@ -1,7 +1,8 @@
 import { errorReport, okReport } from "../lib/report.js";
-import { STALE_SECONDS } from "../fleet-quota/protocol.mjs";
+import { STALE_SECONDS, VERSION } from "../fleet-quota/protocol.mjs";
+import { REMOTE_PROVIDERS } from "../providers/index.js";
 
-const providers = new Set(["claude", "codex"]);
+const providers = new Set(REMOTE_PROVIDERS.map((p) => p.id));
 const currentStatuses = new Set(["ready", "in-flight"]);
 const machineReasons = new Map([
   ["unreachable", "Machine offline"],
@@ -47,7 +48,8 @@ const refreshReasons = new Map([
 ]);
 
 const text = (value) => typeof value === "string" && /^[^\p{C}]{1,80}$/u.test(value) && value.trim() !== "";
-const safePlans = new Set(["free", "pro", "plus", "max", "team", "business", "enterprise", "edu"]);
+const safePlans = new Set(["free", "pro", "pro+", "plus", "max", "team", "business", "enterprise", "edu", "ultra"]);
+const currentSources = new Map([["cli", "CLI"], ["host", "Omarchy collector"]]);
 const nonPlan = new Map([
   ["frontier_credit", { kind: "credit", label: "Frontier credit" }],
   ["monthly_spend_limit", { kind: "spend", label: "Monthly usage credits" }],
@@ -85,7 +87,7 @@ function currentMeasurements(value, reason, now) {
 function reading(value, now) {
   if (!Number.isFinite(value?.observedAt) || value.observedAt < 0 || value.observedAt > now) return null;
   const plan = typeof value.plan === "string" ? value.plan.toLowerCase() : null;
-  const source = value.source === "cli" ? "Provider CLI" : value.source === "history" ? "Dated history" : null;
+  const source = currentSources.get(value.source) ?? (value.source === "history" ? "Dated history" : null);
   return source && okReport(source, now, windows(value.windows), safePlans.has(plan) ? plan : null, value.observedAt);
 }
 
@@ -106,7 +108,7 @@ function projectMachine(machine, now) {
     const { provider, status, reason } = item;
     const blocked = ["paused", "not-enrolled", "offline", "unverified", "disabled"].some((code) => status === code || reason === code);
     const providerGate = machineReason ?? (item.enrolled === false ? "Provider not enrolled" : blocked ? reasons.get(reason) ?? reasons.get(status) : null);
-    const current = !providerGate && currentStatuses.has(status) && item.current?.source === "cli" ? reading(item.current, now) : null;
+    const current = !providerGate && currentStatuses.has(status) && currentSources.has(item.current?.source) ? reading(item.current, now) : null;
     const history = registered ? reading(item.history, now) : null;
     const measurements = provider === "claude" && current ? currentMeasurements(item.current, reason, now) : [];
     const unavailable = measurements.length ? "No current plan reading"
@@ -121,7 +123,7 @@ function projectMachine(machine, now) {
 }
 
 export function coordinatorProjection(snapshot, now) {
-  if (snapshot?.version !== 1 || !Number.isFinite(now) || !Array.isArray(snapshot.remotes)) return null;
+  if (snapshot?.version !== VERSION || !Number.isFinite(now) || !Array.isArray(snapshot.remotes)) return null;
   const remotes = snapshot.remotes.filter((machine) => text(machine?.route) && text(machine.label));
   return { now, machines: remotes.filter((m) => remotes.filter(({ route }) => route === m.route).length === 1)
     .map((machine) => projectMachine(machine, now)) };
