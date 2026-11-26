@@ -107,16 +107,19 @@ anything.
 Quota readings are different: they come from the providers, asked with the
 sign-in already on the machine being read.
 
-- **This computer:** the bar in `mods/usage-limits-fleet-canary`, which
-  `npm run install:local` does not install, asks Claude (`claude -p`,
-  `get_usage`) and Codex (`codex app-server`) when it loads and every five
-  minutes (hourly while a CLI is not installed). A manual refresh waits at least
-  30 seconds. The dashboard only shows what a bar has read.
+- **This computer:** each loaded copy of the bar in
+  `mods/usage-limits-fleet-canary`, which `npm run install:local` does not
+  install, asks Claude (`claude -p`, `get_usage`) and Codex (`codex app-server`)
+  when it loads and every five minutes (hourly while a CLI is not installed). A
+  manual refresh, or showing a hidden provider again, asks sooner. The dashboard
+  only shows what a bar has read.
 - **Another machine:** its providers are not asked until you install the quota
   helper there (Linux: `sh scripts/install-quota.sh`, then the same with
-  `enroll`) and add that grant on the viewer. While the bar or the dashboard is
-  loaded, the viewer then asks the helper only about the providers in the grant:
-  - Codex through `codex app-server`.
+  `enroll`) and add that grant by hand to the viewer's
+  `data/fleet-quota/enrollments.json`. While the bar or the dashboard is loaded,
+  the viewer then asks the helper only about the providers in the grant:
+  - Codex through `codex app-server`, falling back to the Omarchy collector's
+    record.
   - Claude through `claude -p` `get_usage`, or `/usage` in a hidden terminal
     session if you set that up. It skips both while that machine's Omarchy
     collector record is current.
@@ -125,20 +128,22 @@ sign-in already on the machine being read.
     that machine, if present. That program is not part of this repository and may
     contact the provider.
 
-  For each provider, the helper's own CLI quota requests are at least five
-  minutes apart, or 30 seconds on a manual refresh, and further apart after
-  repeated failures. In between, it may ask the CLI which account is signed in.
+  Under one grant, the helper starts a CLI quota check for a provider at most
+  every five minutes, or every 30 seconds on a manual refresh, and less often
+  after repeated failures. One Claude check can make both requests above. In
+  between, it may ask the CLI which account is signed in.
 
 The helper returns only quota data, over Herdr's connection: percentages used,
 window names and lengths, reset times, plan, Claude's credit amounts,
 timestamps, a status and hashed identifiers. It returns no tokens, e-mail
 addresses, prompts or responses, and this project uploads nothing anywhere else.
 
-To turn quotas off on this computer, clear a provider in both the **Bar** and
-**Panel** columns of the bar's settings, or remove the bar from your layout. For
-another machine, run `sh scripts/install-quota.sh revoke` there: the helper then
-refuses before asking anyone. A usage collector that machine runs on its own
-schedule is separate and keeps running.
+To stop the bar on this computer from asking, clear each provider in both the
+**Bar** and **Panel** columns of its settings, or remove it from your layout.
+Remote reads continue, from the dashboard too, until you run
+`sh scripts/install-quota.sh revoke` on the machine being read (this computer as
+well, if you enrolled it): its helper then refuses before asking anyone. A usage
+collector that a machine runs on its own schedule is separate and keeps running.
 
 ## Development
 
