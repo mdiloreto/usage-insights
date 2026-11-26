@@ -159,3 +159,21 @@ Changes from upstream:
 - Survives Node upgrades: the installer records a stable `node` path (such as
   Homebrew's `bin/node`) and the panel falls back to `node` on PATH when the
   recorded binary is gone.
+
+## Credits
+
+- Insights:
+  [GaganSD/coding-agent-toolkit](https://github.com/GaganSD/coding-agent-toolkit/tree/main/herdr-insights)
+  (MIT, © Gagan Devagiri) →
+  [harshcurious/usage-insights](https://github.com/harshcurious/usage-insights) →
+  this fork.
+- `mods/usage-limits-fleet-canary` is derived from
+  [nozikov/herdr-usage-limits](https://github.com/nozikov/herdr-usage-limits) at
+  [`7ea49bb`](https://github.com/nozikov/herdr-usage-limits/commit/7ea49bb)
+  (MIT, © 2026 Anton Nozikov). Commit `2128d83` says it derives from Herdr's
+  native usage-limits mod; that is wrong.
+- Its panel icons are from [Lucide](https://lucide.dev) (ISC), as
+  [credited upstream](https://github.com/nozikov/herdr-usage-limits#credits).
+
+The notices for the last two are in
+[LICENSE-THIRD-PARTY.md](mods/usage-limits-fleet-canary/LICENSE-THIRD-PARTY.md).
