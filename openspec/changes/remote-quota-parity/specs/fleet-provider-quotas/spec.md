@@ -90,10 +90,15 @@ The expanded details SHALL group quotas under one header per machine (This Compu
 
 The observation time of a host-native reading SHALL be the record's `limitsFetchedAt`, not the record's file time, `updatedAt` or the read time. A record with `limitsStale` true SHALL be shown only as dated history. A window whose reset time has passed with no newer fetch SHALL show expired or waiting for a fresh window, never 0%.
 
-#### Scenario: Show a 15-day-old Antigravity record
+#### Scenario: Show an old Antigravity record
 
-- **WHEN** the Antigravity record has `limitsFetchedAt` 2026-11-11, resets in the past and zeros for Session and Weekly
+- **WHEN** the Antigravity record has resets in the past and zeros for Session and Weekly, and a `limitsFetchedAt` within the shared 14-day history bound
 - **THEN** the provider shows no current reading, details show the windows as expired dated history with their original age, and no current 0% is shown
+
+#### Scenario: Drop a record past the history bound
+
+- **WHEN** the Antigravity record's `limitsFetchedAt` is 14 days old or older (for example 2026-11-11 read on 2026-11-26)
+- **THEN** the provider shows unavailable with no windows, no age and no 0%
 
 #### Scenario: Show a record the collector marks stale
 
