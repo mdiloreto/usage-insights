@@ -6,6 +6,7 @@ const mainSource = await readFile(new URL("../mods/insights/main.js", import.met
 const analyticsSource = await readFile(new URL("../mods/insights/analytics.js", import.meta.url), "utf8");
 const uiSource = await readFile(new URL("../mods/insights/ui.js", import.meta.url), "utf8");
 const fleetSource = await readFile(new URL("../mods/insights/core/fleet.mjs", import.meta.url), "utf8");
+const quotaSource = await readFile(new URL("../mods/insights/quota-view.js", import.meta.url), "utf8");
 const dataUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 const analyticsUrl = dataUrl(analyticsSource);
 const analytics = await import(analyticsUrl);
@@ -17,8 +18,10 @@ function fakeNativeElement() {
   let element;
   const methods = {
     child(value) {
-      // Herdr rejects a missing child instead of skipping it.
-      if (value === null || value === undefined) throw new Error("child(value) expects an element, a string, or an entity");
+      if (globalThis.__insightsTestNative.strictChildren
+        && (value === null || !["string", "object"].includes(typeof value))) {
+        throw new TypeError("child(value) expects an element, a string, or an entity");
+      }
       node.childNodes.push(value);
       return element;
     },
@@ -112,6 +115,15 @@ const uiNames = Object.keys(ui).join(", ");
 const fleetUrl = dataUrl(fleetSource);
 const fleet = await import(fleetUrl);
 const fleetNames = Object.keys(fleet).join(", ");
+const quotaUrl = dataUrl(quotaSource
+  .replace(/^import \{ div, svg \} from "gpui-kit";$/m, `const div = () => globalThis.__insightsTestNative.create("div");
+const svg = (path) => globalThis.__insightsTestNative.create("svg").asset(path);`)
+  .replace(/^import \{ h_flex, v_flex \} from "gpui-base";$/m, `const h_flex = div; const v_flex = div;`)
+  .replace(/^import \{ formatDuration, formatTimestamp \} from "\.\/analytics\.js";$/m, `const { formatDuration, formatTimestamp } = await import("${analyticsUrl}");`)
+  .replace(/^import \{ G, card, cardHeader, fieldLabel, mutedText \} from "\.\/ui\.js";$/m, `const { G, card, cardHeader, fieldLabel, mutedText } = await import("${uiUrl}");`));
+const { renderQuota } = await import(quotaUrl);
+const projectionUrl = new URL("../mods/insights/quota-projection.mjs", import.meta.url).href;
+const { insightQuotaHosts, mountQuotaView } = await import(projectionUrl);
 
 const transformedMain = mainSource
   .replace(/^import \{ View, div, svg \} from "gpui-kit";$/m, `const View = class View {};
@@ -145,8 +157,11 @@ const Popover = {
     /^import \{[^}]*\} from "herdr";$/m,
     `const appHome = () => "/app";
 const home = () => "/home";
+const checking = () => globalThis.__insightsTestHerdr?.checking?.() ?? false;
 const theme = () => ({});
 const settings = () => globalThis.__insightsTestSettings ?? ({});
+const shared = (key) => globalThis.__insightsTestHerdr?.shared?.(key);
+const setShared = (...args) => globalThis.__insightsTestHerdr?.setShared?.(...args);
 const nextCommand = () => globalThis.__insightsTestHerdr.nextCommand();
 const exec = (...args) => globalThis.__insightsTestHerdr.exec(...args);
 const readTextFile = (...args) => globalThis.__insightsTestHerdr.readTextFile(...args);
@@ -167,6 +182,17 @@ const machines = () => globalThis.__insightsTestHerdr?.machines?.() ?? [];`,
     /^import \{[\s\S]*?\} from "\.\/core\/fleet\.mjs";$/m,
     `const { ${fleetNames} } = await import("${fleetUrl}");`,
   )
+  .replace(/^import \{ renderQuota \} from "\.\/quota-view\.js";$/m, `const { renderQuota } = await import("${quotaUrl}");`)
+  .replace(/^import \{ insightQuotaHosts, mountQuotaView \} from "\.\/quota-projection\.mjs";$/m,
+    `const { insightQuotaHosts, mountQuotaView } = await import("${projectionUrl}");`)
+  .replace(/^import \{ createQuotaCoordinator, REVISION_KEY, TICK_MS \} from "\.\/fleet-quota\/coordinator\.mjs";$/m,
+    `const REVISION_KEY = "fleet-quota.owner"; const TICK_MS = 250;
+const createQuotaCoordinator = (bindings) => globalThis.__insightsTestHerdr?.quotaCoordinator?.(bindings) ??
+  { mount: () => false, snapshot: () => null, dispose() {} };`)
+  .replace(/^import \{ createQuotaEnrollmentStore, ENROLLMENT_OBSERVE_MS \} from "\.\/fleet-quota\/enrollments\.mjs";$/m,
+    `const ENROLLMENT_OBSERVE_MS = 5000;
+const createQuotaEnrollmentStore = (bindings) => globalThis.__insightsTestHerdr?.quotaEnrollment?.(bindings) ??
+  { observe: async () => true, readEnrollments: () => [], invalidateEnrollment: async () => false };`)
   .replace(
     /^import \{[\s\S]*?\} from "\.\/ui\.js";$/m,
     `const { ${uiNames} } = await import("${uiUrl}");`,
@@ -198,11 +224,14 @@ function presentationFor(snapshot, options, command = "snapshot") {
 function useHerdr({ readTextFile, execResult } = {}) {
   const state = {
     commands: [], execCalls: [], panes: [], props: {}, runtimeReads: [], spaces: [], machines: [],
-    exportFolder: "/exports", exportWrites: [], notifications: [],
+    exportFolder: "/exports", exportWrites: [], notifications: [], checking: false, quotaSignals: [],
   };
   state.herdr = {
     appHome: () => "/app",
     home: () => "/home",
+    checking: () => state.checking,
+    shared: (key) => { state.quotaSignals.push(key); return null; },
+    setShared() {},
     theme: () => ({}),
     settings: () => ({}),
     nextCommand: () => new Promise(() => {}),
@@ -249,7 +278,7 @@ function liveCx() {
     },
     timer: {
       every(ms, fn) {
-        const timer = { ms, fn, cancel() {} };
+        const timer = { ms, fn, cancelled: false, cancel() { timer.cancelled = true; } };
         calls.timers.push(timer);
         return timer;
       },
@@ -310,6 +339,8 @@ function blankInstance() {
   instance.heatmapMode = "daily";
   instance.years = [2024];
   instance.dashboard = null;
+  instance.machineScope = { kind: "local" };
+  instance.machineView = null;
   instance.dashboardKey = null;
   instance.exporting = false;
   instance.exportTask = null;
@@ -372,13 +403,12 @@ test("native mod keeps timers and shell use inside the Herdr contract", () => {
   assert.doesNotMatch(mainSource, /--rebuild/);
   assert.match(mainSource, /readTextFile\(this\.runtimePath\(\)\)/);
   assert.match(mainSource, /mods\/insights\/runtime\.json/);
-  assert.equal((mainSource.match(/this\.execNode\(\[/g) ?? []).length, 4);
+  assert.equal((mainSource.match(/this\.execNode\(\[/g) ?? []).length, 3);
   assert.equal((mainSource.match(/\bexec\((?:node|DEFAULT_NODE), args, options\)/g) ?? []).length, 2);
   assert.match(mainSource, /presenter\.mjs/);
   assert.match(mainSource, /"prepare"/);
-  // The fleet is read through the same helper and the same Node binary.
-  assert.match(mainSource, /"fleet"/);
-  assert.match(mainSource, /readFleetMachine/);
+  assert.match(mainSource, /"machine-dashboard"/);
+  assert.doesNotMatch(mainSource, /readFleetMachine|readFleet\b/);
   assert.match(mainSource, /timer\.after\(0/);
   assert.match(mainSource, /configure/);
   assert.match(mainSource, /--config/);
@@ -448,6 +478,19 @@ test("export writes the current dashboard as Markdown without running the collec
   assert.equal(state.notifications.length, 1, "cancelling the picker is silent");
   assert.equal(instance.exporting, false);
 
+  let chooseFolder;
+  state.herdr.pickFolder = ({ prompt }) => {
+    assert.equal(prompt, "Export This Computer");
+    return new Promise((resolve) => { chooseFolder = resolve; });
+  };
+  instance.exportMarkdown(cx);
+  await flush();
+  instance.setMachine("all", cx);
+  chooseFolder("/exports");
+  await flush();
+  assert.equal(state.exportWrites.length, 1, "switching out of This Computer while picking a folder cancels export");
+  instance.setMachine("local", cx);
+
   instance.filters.provider = "stale";
   instance.exportMarkdown(cx);
   await flush();
@@ -466,7 +509,7 @@ test("export is a single toolbar button that starts a Markdown export", () => {
     const label = Array.isArray(node.calls)
       ? node.calls.find(([name]) => name === "accessibility_label")
       : null;
-    if (label?.[1]?.[0] === "Export") return node;
+    if (label?.[1]?.[0] === "Export This Computer") return node;
     for (const child of node.childNodes ?? []) {
       const found = findExportButton(child);
       if (found) return found;
@@ -684,8 +727,7 @@ test("refresh and configure share one single-flight guard", () => {
   instance.refresh(cx);
   assert.equal(instance.loading, true);
   assert.equal(instance.busy(), true);
-  // One task for the local snapshot. The fleet read is a task of its own, and
-  // it only starts when another machine is actually connected.
+  // Local uses only the existing snapshot task.
   assert.equal(cx.calls.spawn, 1);
   assert.equal(cx.calls.notify, 1);
 
@@ -703,7 +745,7 @@ test("refresh and configure share one single-flight guard", () => {
   instance.saving = false;
   assert.equal(instance.busy(), false);
   assert.match(mainSource, /button\("insights-refresh",[^;]*?disabled: this\.busy\(\)/);
-  const headerAt = mainSource.indexOf("  header(c) {");
+  const headerAt = mainSource.indexOf("  header(c,");
   const refreshAt = mainSource.indexOf('"insights-refresh"', headerAt);
   const exportAt = mainSource.indexOf('"insights-export"', headerAt);
   const settingsAt = mainSource.indexOf('"insights-settings"', headerAt);
@@ -714,9 +756,9 @@ test("refresh and configure share one single-flight guard", () => {
 });
 
 test("dashboard render uses the precomputed presentation and builds closed filter menus lazily", () => {
-  assert.match(mainSource, /const derived = this\.dashboard;/);
+  assert.match(mainSource, /const derived = local \? \(this\.dashboardCurrent\(\) \? this\.dashboard : null\) : view\?\.dashboard;/);
   assert.doesNotMatch(mainSource, /dashboardCache|updateDashboard|deriveDashboard/);
-  assert.doesNotMatch(mainSource, /\b(buildHeatmap|facetStats|filterRows|filterRowsByRange|leaderboard|peakDay|streakStats|sumTokens)\(/);
+  assert.doesNotMatch(mainSource, /\b(buildHeatmap|buildModelSeries|facetStats|filterRows|filterRowsByRange|leaderboard|peakDay|streakStats|sumTokens)\(/);
   assert.match(mainSource, /if \(this\.openFilter === id && this\.openOptions\)/);
   assert.match(mainSource, /this\.openOptions = open \? buildFacetOptions/);
   assert.match(mainSource, /menu\.content\(this\.filterMenuContent/);
@@ -725,56 +767,532 @@ test("dashboard render uses the precomputed presentation and builds closed filte
   assert.match(mainSource, /scheduleDashboard\(clickCx, \{ force: true \}\)/);
 });
 
-test("the fleet card lists each machine, its total, and why a machine could not be read", () => {
+test("inline cache notices name only degraded machines with their age or safe reason", () => {
   const instance = blankInstance();
-  instance.fleet = {
-    kind: "insights-fleet",
-    range: "all time",
-    machines: [{
-      label: "studio",
-      totals: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 15, messages: 1 },
-      ageMs: 60_000,
-      stale: false,
-    }],
-    fleet: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 15, messages: 1 },
-    skipped: [{ label: "office", reason: "could not reach that machine" }],
-  };
-
-  const text = [];
-  const walk = (node) => {
-    if (typeof node === "string") { text.push(node); return; }
-    for (const child of node?.childNodes ?? []) walk(child);
-  };
-  walk(instance.fleetCard({ text: "#eee", dim: "#888" }));
-  const rendered = text.join(" ");
-
-  assert.match(rendered, /studio/, "the machine that was read is named");
-  assert.match(rendered, /15/, "its own total is shown");
-  assert.match(rendered, /could not reach that machine/, "a machine that could not be read keeps its reason");
-  assert.match(rendered, /not counted/, "and is never presented as a machine that used nothing");
+  instance.machineLabels = new Map([["studio", "Studio"]]);
+  assert.deepEqual(instance.cacheNotices({}, [
+    { name: null, status: "fresh", ageMs: 0 },
+    { name: "studio", status: "stale", ageMs: 60_000 },
+    { name: "unknown-age", status: "stale", ageMs: null },
+    { name: "office", status: "unavailable", reason: "could not reach that machine" },
+  ]).map(renderedText), [
+    "Studio · Showing older usage data · 1m old",
+    "unknown-age · Showing older usage data · age unknown",
+    "office · Token history unavailable · could not reach that machine",
+  ]);
 });
 
-test("with no fleet reading the dashboard shows no fleet card", () => {
-  const instance = blankInstance();
-  assert.equal(instance.fleetCard({ text: "#eee", dim: "#888" }), null);
-  instance.fleet = { kind: "insights-fleet", range: "all time", machines: [], fleet: null, skipped: [] };
-  assert.equal(instance.fleetCard({ text: "#eee", dim: "#888" }), null);
-});
+function renderedText(node) {
+  if (typeof node === "string") return node;
+  return (node?.childNodes ?? []).map(renderedText).join(" ");
+}
 
-test("the dashboard renders before any fleet reading arrives", () => {
+function scopedReply(options, statuses) {
+  const machines = Object.entries(statuses).map(([name, status]) => ({
+    name: name === "local-fixture" ? null : name,
+    status, ageMs: status === "unavailable" ? null : status === "stale" ? 120_000 : 10,
+    reason: status === "unavailable" ? "no cache on that machine" : null,
+  }));
+  const readable = machines.filter(({ status }) => status !== "unavailable").length;
+  const dashboard = readable ? presentationFor(savedSnapshot(), options).dashboard : null;
+  if (dashboard) {
+    dashboard.lifetime = { ...dashboard.lifetime, total: 716 };
+    dashboard.rowCount = 1;
+    if (options.scope.kind === "all") {
+      const { models, ...series } = dashboard.modelSeries;
+      dashboard.machineSeries = { ...series, machines: [] };
+    }
+  }
+  const stale = machines.filter(({ status }) => status === "stale").length;
+  return { code: 0, stdout: JSON.stringify({
+    version: 1, kind: "insights-machine-dashboard", scope: options.scope, dashboard,
+    coverage: { total: machines.length, readable, stale, partial: readable !== machines.length, machines },
+  }) };
+}
+
+test("with no remotes All uses the Local dashboard but does not enable export", () => {
   useHerdr();
   const instance = blankInstance();
-  const snapshot = savedSnapshot();
-  const rows = [{
-    day: "2024-01-10", session: "s1", harness: "pi", provider: "openai", model: "gpt-test", project: "/repo/insights",
-    tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }, messages: 1, activeMs: 1000, longestTaskMs: 1000,
-  }];
-  instance.snapshot = { ...snapshot, rows, rowCount: rows.length };
-  instance.dashboard = compactDashboard(deriveDashboard({ ...snapshot, rows }, {
-    filters: instance.filters, period: "all", year: 2024, heatmapMode: "daily", selectedDay: "2024-01-10", today: "2024-01-10",
-  }));
-  instance.fleet = null;
-  assert.doesNotThrow(() => instance.dashboardView({ text: "#eee", dim: "#888" }));
+  instance.machineScope = { kind: "all" };
+  const snapshot = { ...savedSnapshot(), savedAt: new Date().toISOString() };
+  instance.snapshot = compactSnapshotFor(snapshot);
+  const options = instance.dashboardOptions();
+  instance.dashboard = presentationFor(snapshot, options).dashboard;
+  instance.dashboardKey = presentationKey(instance.snapshot, options);
+  const visible = renderedText(instance.dashboardView({}));
+  assert.match(visible, /Token usage · All.*Token history by machine.*Top models/);
+  assert.doesNotMatch(visible, /Token coverage|partial coverage|Showing older usage data|unavailable/);
+  assert.match(renderedText(instance.machinePicker({}, instance.machineTarget())), /\bAll\b.*This Computer.*Export is available only for This Computer/);
+  assert.equal(instance.exportReady(), false);
+  instance.setMachine("local", fakeCx());
+  assert.equal(instance.exportReady(), true);
+});
+
+test("scoped dashboard renders its loading state without a null native child", (t) => {
+  const state = useHerdr();
+  state.machines = [{ name: "linux" }];
+  const instance = blankInstance();
+  instance.machineScope = { kind: "all" };
+  globalThis.__insightsTestNative.strictChildren = true;
+  t.after(() => { globalThis.__insightsTestNative.strictChildren = false; });
+
+  const visible = renderedText(instance.dashboardView({}));
+  assert.match(visible, /Preparing All insights/);
+  assert.doesNotMatch(visible, /Token coverage/);
+  assert.equal(state.execCalls.length, 0);
+});
+
+test("new machine discovery after the local scan queues preparation once without exec in render", async () => {
+  const state = useHerdr({
+    execResult: (_binary, argv) => {
+      assert.equal(argv[1], "machine-dashboard");
+      return scopedReply(optionArgument(argv), { "local-fixture": "fresh", linux: "fresh" });
+    },
+  });
+  state.machines = [{ name: null }];
+  const instance = blankInstance();
+  instance.machineScope = { kind: "all" };
+  instance.year = Number(analytics.todayKey().slice(0, 4));
+  const { cx, calls } = liveCx();
+  const snapshot = { ...savedSnapshot(), savedAt: new Date().toISOString() };
+  instance.applySnapshot(presentationFor(snapshot, instance.dashboardOptions()), cx);
+  assert.doesNotMatch(renderedText(instance.render(cx)), /Token coverage|Showing older usage data|unavailable/);
+  assert.equal(calls.after.length, 0);
+
+  state.machines.push({ name: "linux", layout: "loading" });
+  assert.match(renderedText(instance.render(cx)), /Preparing All insights/);
+  instance.render(cx);
+  assert.equal(state.execCalls.length, 0);
+  assert.equal(calls.after.length, 1, "a registry change schedules one native callback");
+
+  await calls.runAfter();
+  await calls.runAfter();
+  assert.equal(state.execCalls.length, 1);
+  assert.deepEqual(optionArgument(state.execCalls[0].args).remoteNames, ["linux"]);
+  const visible = renderedText(instance.render(cx));
+  assert.match(visible, /Machine All This Computer linux.*Token usage · All.*Token history by machine/);
+  assert.doesNotMatch(visible, /Token coverage|partial coverage|Showing older usage data|unavailable|Todas|Esta Mac|Cuotas/);
+});
+
+test("All draws the aggregate and each host as weekly bars, separately from model history", () => {
+  const state = useHerdr();
+  state.machines = [{ name: null }, { name: "linux" }, { name: "office" }];
+  const instance = blankInstance();
+  instance.machineScope = { kind: "all" };
+  instance.machineLabels = new Map([["linux", "Build box"]]);
+  const { key, options } = instance.dashboardRequest();
+  const payload = JSON.parse(scopedReply(options, { "local-fixture": "fresh", linux: "stale", office: "unavailable" }).stdout);
+  payload.dashboard.machineSeries = {
+    weeks: [
+      { start: "2024-01-07", total: 10, segments: [{ name: null, tokens: 10 }] },
+      { start: "2024-01-14", total: 35, segments: [{ name: null, tokens: 15 }, { name: "linux", tokens: 20 }] },
+    ],
+    machines: [null, "linux"], maxTotal: 35, windowTotal: 45, includeCache: false,
+  };
+  instance.machineView = { key, payload };
+
+  const dashboard = instance.dashboardView(ui.tokens({}));
+  const visible = renderedText(dashboard);
+  assert.match(visible, /Build box · Showing older usage data · 2m old/);
+  assert.match(visible, /office · Token history unavailable · no cache on that machine/);
+  assert.match(visible, /Token history by machine.*2 weeks · 45 tokens · cache excluded.*This Computer.*Build box.*Tokens History.*Top models/);
+  assert.doesNotMatch(visible, /Token coverage|partial coverage/);
+  const card = dashboard.childNodes.find((node) => renderedText(node.childNodes?.[0]).startsWith("Token history by machine"));
+  const bars = card.childNodes[1].childNodes[0].childNodes[1].childNodes;
+  const methodArg = (node, method) => node.calls.find(([name]) => name === method)?.[1][0];
+  assert.equal(bars.length, 2);
+  assert.match(methodArg(bars[0], "tooltip"), /10 tokens/);
+  assert.match(methodArg(bars[1], "tooltip"), /35 tokens/);
+  assert.ok(methodArg(bars[0].childNodes[0], "h") < methodArg(bars[1].childNodes[0], "h"));
+  const segments = bars[1].childNodes[0].childNodes;
+  assert.deepEqual(segments.map((node) => methodArg(node, "tooltip")), ["This Computer · 15 tokens", "Build box · 20 tokens"]);
+  assert.notEqual(methodArg(segments[0], "bg"), methodArg(segments[1], "bg"));
+  assert.deepEqual(state.execCalls, []);
+});
+
+test("quota projection stacks by machine and keeps zero, exhaustion, pace, resets and unavailable status distinct", (t) => {
+  const now = Date.now();
+  const resetAtMs = now + 3_600_000;
+  const hosts = [
+    { name: "linux", label: "Build box", providers: [
+      { provider: "codex", plan: "Plus", status: "current", source: "CLI", observedAtMs: now - 60_000,
+        windows: [{ label: "Week", usedPercent: 100, resetAtMs, pacePercent: 25 }] },
+      { provider: "claude", status: "stale", source: "Dated snapshot", reason: "Auth expired", observedAtMs: now - 7_200_000,
+        windows: [{ label: "Week", usedPercent: 99 }] },
+    ] },
+    { name: null, label: "Ignored local label", providers: [
+      { provider: "codex", status: "current", source: "CLI", observedAtMs: now, windows: [
+        { label: "5 h", usedPercent: 0, resetAtMs, pacePercent: 10 },
+        { label: "Week", usedPercent: 35, resetAtMs: now },
+        { label: "Other", usedPercent: null },
+      ] },
+      { provider: "claude", status: "unobserved", windows: [] },
+    ] },
+  ];
+  const opts = { localLabel: "This Computer", now };
+  globalThis.__insightsTestNative.strictChildren = true;
+  t.after(() => { globalThis.__insightsTestNative.strictChildren = false; });
+  const block = renderQuota(hosts, { kind: "all" }, {}, opts);
+  const text = renderedText(block);
+  assert.match(text, /Quotas.*This Computer.*Codex.*5 h.*\b0%.*Resets in 1H.*Week.*— Awaiting reset reading/);
+  assert.match(text, /Other.*— No reading.*— Not observed.*Build box.*Codex Plus.*\b100%.*CLI.*Observed 1m ago/);
+  assert.match(text, /Stale · Auth expired · Dated snapshot · Observed 2H ago/);
+  assert.doesNotMatch(text, /35%|99%|Ignored local label|Cuotas/);
+  const calls = [];
+  const walk = (node) => {
+    if (typeof node !== "object" || !node) return;
+    calls.push(...node.calls);
+    for (const child of node.childNodes) walk(child);
+  };
+  walk(block);
+  assert.ok(calls.some(([method, args]) => method === "tooltip" && args[0] === "0% used · 10% pace"));
+  assert.ok(calls.some(([method, args]) => method === "tooltip" && args[0] === "100% used · 25% pace"));
+  assert.ok(calls.some(([method, args]) => method === "left" && args[0] === 16), "pace has its own marker");
+  assert.ok(calls.some(([method, args]) => method === "asset" && args[0].endsWith("/openai.svg")));
+  assert.ok(calls.some(([method, args]) => method === "asset" && args[0].endsWith("/anthropic.svg")));
+  const remote = renderedText(renderQuota(hosts, { kind: "remote", name: "linux" }, {}, opts));
+  const local = renderedText(renderQuota(hosts, { kind: "local" }, {}, opts));
+  assert.match(remote, /Build box.*100%/);
+  assert.doesNotMatch(remote, /This Computer/);
+  assert.match(local, /This Computer.*\b0%/);
+  assert.doesNotMatch(local, /Build box|100%/);
+  assert.match(renderedText(renderQuota(hosts, { kind: "remote", name: "missing" }, {}, opts)), /missing.*— No quota reading/);
+});
+
+test("quota sections name Copilot and Antigravity per machine with their Herdr icons and dated history", () => {
+  const now = Date.now();
+  const hosts = [{ name: "linux", label: "Build box", providers: [
+    { provider: "copilot", plan: "Enterprise", status: "current", source: "Omarchy collector", observedAtMs: now - 60_000,
+      windows: [{ label: "Monthly", usedPercent: 100 }] },
+    { provider: "codex", status: "unobserved", windows: [] },
+    { provider: "claude", status: "unobserved", windows: [] },
+    { provider: "agy", status: "stale", reason: "Reading stale", observedAtMs: now - 15 * 86_400_000,
+      windows: [], historyWindows: [{ label: "5h", usedPercent: 0 }] },
+  ] }];
+  const block = renderQuota(hosts, { kind: "remote", name: "linux" }, {}, { localLabel: "This Computer", now });
+  const text = renderedText(block);
+  assert.match(text, /Build box.*Copilot Enterprise.*Monthly.*100%.*Omarchy collector.*Antigravity.*5h \(dated\).*0% used/);
+  const assets = [];
+  const walk = (node) => {
+    if (typeof node !== "object" || !node) return;
+    assets.push(...node.calls.filter(([method]) => method === "asset").map(([, args]) => args[0]));
+    for (const child of node.childNodes) walk(child);
+  };
+  walk(block);
+  assert.deepEqual(assets, ["icons/copilot.svg", "mods/insights/logos/openai.svg", "mods/insights/logos/anthropic.svg", "icons/antigravity.svg"]);
+});
+
+test("quota renderer remains visible with no token history and token filters do not alter it", () => {
+  const state = useHerdr();
+  state.machines = [{ name: null }, { name: "linux" }];
+  const instance = blankInstance();
+  instance.machineScope = { kind: "remote", name: "linux" };
+  const { cx } = liveCx();
+  const { key, options } = instance.dashboardRequest();
+  instance.machineView = { key, payload: JSON.parse(scopedReply(options, { linux: "unavailable" }).stdout) };
+  const before = renderedText(instance.render(cx));
+  assert.match(before, /linux · Token history unavailable/);
+  assert.equal((before.match(/Token history unavailable/g) ?? []).length, 1);
+  assert.doesNotMatch(before, /Quotas|Lifetime tokens|0 tokens|Token coverage/);
+
+  instance.quotaHosts = [{ name: "linux", label: "Build box", providers: [
+    { provider: "codex", status: "current", source: "CLI", windows: [{ label: "5 h", usedPercent: 17 }] },
+  ] }];
+  assert.match(renderedText(instance.render(cx)), /Quotas.*Build box.*17%.*Build box · Token history unavailable · no cache on that machine/);
+  instance.filters.model = "no-token-models";
+  instance.setPeriod("month", cx);
+  assert.match(renderedText(instance.render(cx)), /Quotas.*Build box.*17%.*Preparing Build box insights/);
+  assert.deepEqual(state.execCalls, []);
+});
+
+test("projection maps the registered route separately from its label and preserves an observed zero", () => {
+  const now = 1_800_000_000_000;
+  const projection = {
+    version: 1, owner: "ready", nextUpdateAt: null, local: [], remotes: [
+      { route: "removed", label: "Old", registered: false, providers: [] },
+      { route: "linux", label: "Build box", registered: true, providers: [
+        { provider: "codex", status: "ready", current: { observedAt: now / 1_000 - 60, plan: "Plus", source: "cli",
+          windows: [{ short: "5 h", percent: 0, resetsAt: now / 1_000 + 9_000, durationSec: 18_000 }] } },
+        { provider: "claude", reason: "auth-expired", history: {
+          observedAt: now / 1_000 - 120, plan: null, source: "history", windows: [{ short: "Week", percent: 73 }],
+        } },
+      ] },
+    ],
+  };
+  const display = insightQuotaHosts(projection, "This Computer", now);
+  assert.deepEqual(display.map(({ name, label }) => [name, label]), [[null, "This Computer"], ["linux", "Build box"]]);
+  assert.deepEqual(display[0].providers, []);
+  assert.deepEqual(display[1].providers[0].windows[0],
+    { label: "5 h", usedPercent: 0, resetAtMs: now + 9_000_000, pacePercent: 50 });
+  assert.equal(display[1].providers[1].status, "stale");
+  assert.equal(display[1].providers[1].reason, "Provider sign-in expired");
+  assert.deepEqual(display[1].providers[1].windows, []);
+  assert.equal(insightQuotaHosts({ ...projection, remotes: [] }, "This Computer", now), null);
+  assert.equal(insightQuotaHosts({ ...projection, version: 2 }, "This Computer", now), null);
+});
+
+test("shared quota view mounts once, ticks silently, and cancels deduplicated repaint on close", () => {
+  const { cx, calls } = liveCx();
+  const events = [];
+  let projection = { version: 1, nextUpdateAt: 3 };
+  const view = mountQuotaView(cx, {
+    coordinator: {
+      mount() { events.push("mount"); return true; },
+      tick() { events.push("tick"); },
+      snapshot() { events.push("snapshot"); return projection; },
+      dispose() { events.push("dispose"); },
+    },
+    shared: (key) => events.push(key), revisionKey: "fleet-quota.owner", tickMs: 250, now: () => 1_000,
+  });
+  const tick = calls.timers[0];
+  assert.equal(tick.ms, 250);
+  tick.fn(cx);
+  assert.equal(calls.notify, 0);
+  view.read(cx);
+  view.read(cx);
+  assert.deepEqual(events, ["mount", "tick", "fleet-quota.owner", "snapshot", "fleet-quota.owner", "snapshot"]);
+  assert.equal(calls.after.length, 1);
+  assert.equal(calls.after[0].ms, 2_000);
+  const previous = calls.after[0];
+  projection = { version: 1, nextUpdateAt: 4 };
+  view.read(cx);
+  assert.equal(previous.cancelled, true);
+  previous.fn();
+  assert.equal(calls.notify, 0);
+  const next = calls.after[1];
+  next.fn();
+  view.read(cx);
+  assert.equal(calls.notify, 1);
+  assert.equal(calls.after.length, 2, "the same boundary is not rearmed");
+  projection = { version: 1, nextUpdateAt: 5 };
+  view.read(cx);
+  const closing = calls.after[2];
+  view.dispose();
+  view.dispose();
+  tick.fn(cx);
+  closing.fn();
+  assert.equal(closing.cancelled, true);
+  assert.equal(tick.cancelled, true);
+  assert.equal(calls.notify, 1);
+  assert.equal(events.filter((event) => event === "tick").length, 1);
+  assert.equal(events.filter((event) => event === "dispose").length, 1);
+  assert.equal(view.read(cx), null);
+});
+
+test("full Insights owns the quota view and enrollment observer; check and toolbar do not mount them", async () => {
+  const state = useHerdr({ readTextFile: () => new Promise(() => {}) });
+  state.machines = [{ name: "linux" }];
+  let mounts = 0;
+  let ticks = 0;
+  let disposes = 0;
+  let enrollmentCreates = 0;
+  let observations = 0;
+  const readEnrollments = () => [];
+  const invalidateEnrollment = async () => false;
+  state.herdr.quotaEnrollment = ({ appHome, checking, readTextFile, writeTextFile }) => {
+    assert.equal(appHome(), "/app");
+    assert.equal(checking(), false);
+    assert.equal(typeof readTextFile, "function");
+    assert.equal(typeof writeTextFile, "function");
+    enrollmentCreates++;
+    return { readEnrollments, invalidateEnrollment, observe: async () => { observations++; } };
+  };
+  state.herdr.quotaCoordinator = (bindings) => {
+    const { machines, checking } = bindings;
+    assert.equal(checking(), false);
+    assert.equal(machines()[0].name, "linux");
+    assert.equal(bindings.readEnrollments, readEnrollments);
+    assert.equal(bindings.invalidateEnrollment, invalidateEnrollment);
+    return {
+      mount() { mounts++; return true; },
+      tick() { ticks++; },
+      dispose() { disposes++; },
+      snapshot: () => ({ version: 1, owner: "ready", nextUpdateAt: null, local: [], remotes: [
+        { route: "linux", label: "Build box", registered: true, providers: [] },
+      ] }),
+    };
+  };
+  const checked = new Insights();
+  state.checking = true;
+  checked.init({}, liveCx().cx);
+  checked.close();
+  state.checking = false;
+  state.props = { mode: "toolbar" };
+  const toolbar = new Insights();
+  toolbar.init({}, liveCx().cx);
+  toolbar.close();
+  assert.equal(mounts, 0);
+  assert.equal(enrollmentCreates, 0);
+  state.props = {};
+
+  const instance = new Insights();
+  const { cx, calls } = liveCx();
+  instance.init({}, cx);
+  assert.equal(mounts, 1);
+  assert.equal(enrollmentCreates, 1);
+  const tree = renderedText(instance.render(cx));
+  assert.match(tree, /Machine All This Computer Build box.*Quotas This Computer.*Build box/);
+  assert.equal(instance.exportReady(), false);
+  instance.setMachine("remote:linux", cx);
+  assert.match(renderedText(instance.render(cx)), /Preparing Build box insights/);
+  assert.deepEqual(instance.machineTarget().remoteNames, ["linux"]);
+  instance.setPeriod("week", cx);
+  instance.exportMarkdown(cx);
+  assert.equal(ticks, 0);
+  assert.deepEqual(state.execCalls, []);
+  assert.deepEqual(state.exportWrites, []);
+  assert.ok(state.quotaSignals.every((key) => key === "fleet-quota.owner"));
+  await flush();
+  assert.equal(observations, 1);
+  const enrollmentTimer = calls.timers.find(({ ms }) => ms === 5_000);
+  enrollmentTimer.fn(cx);
+  await flush();
+  assert.equal(observations, 2);
+  const timer = calls.timers.find(({ ms }) => ms === 250);
+  timer.fn(cx);
+  instance.close();
+  timer.fn(cx);
+  enrollmentTimer.fn(cx);
+  await flush();
+  assert.equal(ticks, 1);
+  assert.equal(disposes, 1);
+  assert.equal(timer.cancelled, true);
+  assert.equal(enrollmentTimer.cancelled, true);
+  assert.equal(observations, 2);
+});
+
+test("scope and filter changes suppress late responses and local refresh cannot replace scoped usage", async () => {
+  const pending = [];
+  const state = useHerdr({
+    execResult: (_binary, argv) => new Promise((resolve) => {
+      assert.equal(argv[1], "machine-dashboard");
+      pending.push({ options: optionArgument(argv), resolve });
+    }),
+  });
+  state.machines = [{ name: null }, { name: "linux" }, { name: "office" }];
+  const instance = blankInstance();
+  const { cx, calls } = liveCx();
+  instance.machineScope = { kind: "all" };
+  const local = { ...savedSnapshot(), config: { ...savedSnapshot().config, includeCache: false, weekStartsOn: 1 } };
+  instance.applySnapshot(presentationFor(local, instance.dashboardOptions()), cx);
+  await calls.runAfter();
+  const all = pending.shift();
+  assert.deepEqual(all.options.scope, { kind: "all" });
+  assert.deepEqual(all.options.remoteNames, ["linux", "office"]);
+  assert.equal(all.options.includeCache, false);
+  assert.equal(all.options.weekStartsOn, 1);
+  assert.doesNotMatch(JSON.stringify(all.options), /rows|roots|~\/saved/);
+
+  instance.setMachine("remote:linux", cx);
+  assert.match(renderedText(instance.dashboardView({})), /Preparing linux insights/);
+  all.resolve(scopedReply(all.options, { "local-fixture": "fresh", linux: "fresh", office: "fresh" }));
+  await flush();
+  assert.equal(instance.machineView, null);
+  await calls.runAfter();
+  const remote = pending.shift();
+  assert.deepEqual(remote.options.scope, { kind: "remote", name: "linux" });
+  assert.deepEqual(remote.options.remoteNames, ["linux", "office"]);
+
+  instance.setPeriod("month", cx);
+  remote.resolve(scopedReply(remote.options, { linux: "fresh" }));
+  await flush();
+  assert.equal(instance.machineView, null);
+  await calls.runAfter();
+  const filtered = pending.shift();
+  assert.equal(filtered.options.period, "month");
+  filtered.resolve(scopedReply(filtered.options, { linux: "fresh" }));
+  await flush();
+  assert.equal(instance.machineView.payload.dashboard.lifetime.total, 716);
+
+  instance.applySnapshot(presentationFor(local, instance.dashboardOptions()), cx);
+  assert.equal(instance.dashboard.lifetime.total, 0, "the collector only updates Local");
+  const visible = renderedText(instance.dashboardView({}));
+  assert.match(visible, /Token usage · linux.*716/);
+  assert.doesNotMatch(visible, /office|This Computer|Token history by machine|Token coverage/);
+  assert.equal(instance.exportReady(), false);
+  instance.exportMarkdown(cx);
+  assert.equal(state.exportWrites.length, 0);
+
+  instance.filters.model = "different-model";
+  instance.scheduleDashboard(cx, { force: true });
+  const loading = renderedText(instance.dashboardView({}));
+  assert.match(loading, /Preparing linux insights/);
+  assert.doesNotMatch(loading, /Lifetime tokens|716/);
+
+  instance.setMachine("local", cx);
+  const localLoading = renderedText(instance.dashboardView({}));
+  assert.match(localLoading, /Preparing This Computer insights/);
+  assert.doesNotMatch(localLoading, /Lifetime tokens|716/);
+});
+
+test("a removed machine never shows its late result or another machine's usage", async () => {
+  let complete;
+  const state = useHerdr({
+    execResult: (_binary, argv) => {
+      const options = optionArgument(argv);
+      if (!options.remoteNames.includes("linux")) return scopedReply(options, { linux: "unavailable" });
+      return new Promise((resolve) => { complete = () => resolve(scopedReply(options, { linux: "fresh" })); });
+    },
+  });
+  state.machines = [{ name: null }, { name: "linux" }];
+  const instance = blankInstance();
+  const { cx, calls } = liveCx();
+  instance.setMachine("remote:linux", cx);
+  await calls.runAfter();
+  state.machines = [{ name: null }, { name: "studio" }];
+  assert.match(renderedText(instance.dashboardView({})), /linux.*machine is not registered/);
+  complete();
+  await flush();
+  assert.equal(instance.machineView, null);
+  await calls.runAfter();
+  const visible = renderedText(instance.dashboardView({}));
+  assert.match(visible, /linux · Token history unavailable/);
+  assert.doesNotMatch(visible, /Lifetime tokens|716|studio/);
+});
+
+test("an observed removal fences a same-route replacement while a cache read is in flight", async () => {
+  const pending = [];
+  const state = useHerdr({
+    execResult: (_binary, argv) => new Promise((resolve) => pending.push({ options: optionArgument(argv), resolve })),
+  });
+  state.machines = [{ name: "linux" }];
+  const instance = blankInstance();
+  const { cx, calls } = liveCx();
+  instance.setMachine("remote:linux", cx);
+  await calls.runAfter();
+  const beforeRemoval = pending.shift();
+
+  state.machines = [];
+  assert.match(renderedText(instance.dashboardView({})), /machine is not registered/);
+  state.machines = [{ name: "linux" }];
+  assert.match(renderedText(instance.dashboardView({})), /Preparing linux insights/);
+  beforeRemoval.resolve(scopedReply(beforeRemoval.options, { linux: "fresh" }));
+  await flush();
+  assert.equal(instance.machineView, null, "old Core response is rejected even if the route reappears");
+
+  await calls.runAfter();
+  const replacement = pending.shift();
+  replacement.resolve(scopedReply(replacement.options, { linux: "unavailable" }));
+  await flush();
+  const unavailable = renderedText(instance.dashboardView({}));
+  assert.match(unavailable, /linux · Token history unavailable/);
+  assert.doesNotMatch(unavailable, /Preparing|716/);
+});
+
+test("native check mode initializes All without runtime reads, timers or exec", async () => {
+  const state = useHerdr();
+  state.checking = true;
+  state.machines = [{ name: "linux" }];
+  const { cx, calls } = liveCx();
+  const instance = new Insights();
+  instance.init({}, cx);
+  await flush();
+  assert.deepEqual(instance.machineScope, { kind: "all" });
+  assert.deepEqual(state.runtimeReads, []);
+  assert.deepEqual(state.execCalls, []);
+  assert.equal(calls.spawn, 0);
+  assert.equal(calls.after.length + calls.timers.length, 0);
+  instance.close();
 });
 
 test("heatmap month labels keep their spans while partial labels cannot wrap", () => {
@@ -891,7 +1409,7 @@ test("fitHeatmapWeeks keeps the newest weeks and trims month spans", () => {
 });
 
 test("dashboard is divided into token and model usage sections", () => {
-  assert.match(mainSource, /sectionHeader\("Token usage"/);
+  assert.match(mainSource, /sectionHeader\(`Token usage · \$\{scopeLabel\}`/);
   assert.match(mainSource, /sectionHeader\("Model usage"/);
   assert.match(mainSource, /cardHeader\("Tokens History", range\?\.label \?\? null, c\)/);
   assert.doesNotMatch(mainSource, /53 weeks · ends/);

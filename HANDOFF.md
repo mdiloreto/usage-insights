@@ -37,10 +37,29 @@ it: the UI fetches, `presenter.mjs fleet` computes with the same
 compact result. That is also why the fleet numbers obey the same period, the
 same facets and the same `includeCache` rule for free.
 
+## Quota on a remote host
+
+Usage is read from a cache; quota cannot be, because it needs a provider call
+made with the sign-in that lives on that host. So quota goes through a small
+**helper that is installed explicitly** on each host: versioned, single-shot,
+and read over the same Herdr connection. The viewer sends an allowlisted
+operation, a provider and one 64-hex binding digest. The helper recomputes the
+digest from its own Core identity and the host's opt-in marker, and refuses to
+read or probe if it does not match. Cooldown, backoff and the last good reading
+stay in private state owned by the host, so two viewers cannot double-probe it.
+
+The reply carries sanitized readings only. A missing, ambiguous or stale value
+stays unavailable; it never becomes zero or an estimate. The machine selector
+reads **All**, **This Computer** and each remote, and token history and quotas
+follow the selection. The design, evidence and trade-offs are in
+`openspec/changes/fleet-provider-visibility/`.
+
 ## What is verified
 
-- The whole suite passes: `npm test` → 294 tests, 291 pass, 3 skipped (the ones
-  that need a running Herdr), and `npm run check` is clean.
+- The whole suite passes: `node --test tests/*.test.mjs` → 441 tests, 437 pass,
+  4 skipped, 0 fail, and `npm run check` is clean. One timing test in
+  `tests/collector-lifecycle-gates.test.mjs` can fail under load; rerun that
+  file alone before treating it as a regression.
 - End to end on real data: the headless collector on a Linux host collected 100
   rows of Codex sessions; the presenter aggregated them to **1,563,144,848**
   tokens, with the machine reported as fresh.
@@ -53,13 +72,15 @@ same facets and the same `includeCache` rule for free.
 
 ## What is left
 
-1. **A second measured host.** The fleet card has only ever had one remote.
-   Two remotes would exercise the interesting case: one readable, one not.
-2. **The machine dimension inside the charts.** Right now the fleet is its own
-   card with per-machine totals. Putting a machine facet *inside* the heatmap
-   and the model chart means adding a machine to the row key, the dedup keys and
-   the analytics — invasive, and it will conflict with upstream merges. Decide
-   whether it is worth it before starting.
+1. **The open spec tasks.** Four tasks in
+   `openspec/changes/fleet-provider-visibility/tasks.md` are still open: native
+   Mac qualification of the mounted-owner lease (1.3), provider parity (2.2;
+   Codex only partly verified, Claude plan windows not qualified), a human review
+   of the bar in a disposable app home (4.5), and a manual comparison with the
+   provider's own Settings screen (5.2). The task file has the detail.
+2. **A second measured host.** The live canary has still only read one remote.
+   The two-remote case (one readable, one not) has been exercised with
+   disposable Core instances and fake data, not with a second real host.
 3. **The `update` path.** The collector's own indexer keeps a host's data
    fresh; the fleet view shows age, but nothing yet says *why* a machine is
    behind.
@@ -94,7 +115,7 @@ same facets and the same `includeCache` rule for free.
 ## Commands
 
 ```sh
-npm test                      # 294 tests
+npm test                      # the full suite
 npm run check                 # package checks
 bash scripts/install-headless.sh --check    # what a measured host would get
 bash scripts/install-headless.sh --install --enable
