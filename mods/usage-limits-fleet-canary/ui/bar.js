@@ -63,7 +63,7 @@ function details(id, name, bar, t) {
 }
 
 function fleetTrigger(bar, t) {
-  const { numbers, groups, density, labels } = bar.fleet;
+  const { numbers, groups, density, labels, named } = bar.fleet;
   const content = h_flex().id("ul-content").gap(8).items_center().min_w(0).on_hover(bar.onHover);
   if (numbers.length) content.child(sessionNumbers(numbers, t)).child(divider(t));
   if (labels) {
@@ -72,7 +72,7 @@ function fleetTrigger(bar, t) {
   }
   return content.children(groups.map((host, i) => h_flex().id(`ul-machine-${i}`).gap(8).items_center().flex_none()
     .child(div().text_size(10.5).text_color(t.muted).font_semibold().flex_none().whitespace_nowrap().child(host.label))
-    .children(host.groups.map((g) => providerGroup(g, density, t, `ul-fleet-provider-${i}`)))))
+    .children(host.groups.map((g) => providerGroup(g, density, t, `ul-fleet-provider-${i}`, named !== false)))))
     .child(details("all", null, bar, t));
 }
 

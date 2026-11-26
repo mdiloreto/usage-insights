@@ -211,3 +211,23 @@ test("Follow Space in a remote space shows the machine label and every provider'
   for (const name of ["Claude", "Codex", "Copilot", "Antigravity"]) assert.ok(text.includes(name), name);
   assert.match(text, /100%/);
 });
+
+test("the bar drops provider names, keeping icons and segments, before it falls back to labels only", () => {
+  const models = harness(project(linuxHost())).model();
+  const widths = [];
+  for (let width = 100; width <= 1400; width += 2) {
+    const fleet = fleetBar(models, width, [], true);
+    widths.push([width, fleet.labels ? "labels" : fleet.named === false ? "icons" : fleet.groups[0].groups[0].segments.length > 1 ? "full" : "tight"]);
+  }
+  const stages = [...new Set(widths.map(([, stage]) => stage))];
+  assert.deepEqual(stages, ["labels", "icons", "tight", "full"]);
+  const [width] = widths.find(([, stage]) => stage === "icons");
+  const fleet = fleetBar(models, width, [], true);
+  assert.equal(fleet.density, DENSITY.NO_BARS);
+  assert.deepEqual(fleet.groups[0].groups.map((g) => g.providerId), ["claude", "codex", "copilot", "agy"]);
+  assert.ok(fleet.groups[0].groups.every((g) => g.segments.length <= 1));
+  const bar = { fleet, detailsOpen: null, panel: null, border: false, onResize() {}, onHover() {}, toggleDetails() {} };
+  const text = stub.textOf(stub.nodeOf(statusBar(bar, stub.theme)));
+  assert.ok(text.includes("mateod-arch") && /100%/.test(text));
+  for (const name of ["Claude", "Codex", "Copilot", "Antigravity"]) assert.ok(!text.includes(name), name);
+});
