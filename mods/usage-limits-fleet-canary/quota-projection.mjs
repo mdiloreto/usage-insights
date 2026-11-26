@@ -26,6 +26,7 @@ const REASONS = Object.freeze({
   "transport-unknown": "Could not reach the quota helper",
   "unavailable": "No quota reading available",
   "unsupported": "No usable quota windows returned",
+  "unsupported-source": "Unsupported source version",
   "waiting": "Waiting for a current quota reading",
   "waiting-reset": "Waiting for a reading after reset",
 });
@@ -106,7 +107,8 @@ function providerForDisplay(record, now, remote = false) {
     status: record.current ? "current" : record.history ? "stale"
       : record.status === "waiting" ? "unobserved" : "unavailable",
     plan: evidence?.plan ?? null,
-    source: evidence?.source === "cli" ? "CLI" : evidence?.source === "history" ? "Dated reading" : null,
+    source: evidence?.source === "cli" ? "CLI" : evidence?.source === "host" ? "Omarchy collector"
+      : evidence?.source === "history" ? "Dated reading" : null,
     reason: Object.hasOwn(REASONS, record.reason) ? REASONS[record.reason] : null,
     observedAtMs: evidence ? evidence.observedAt * 1_000 : null,
     windows,
