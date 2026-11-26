@@ -1,7 +1,7 @@
 // Insights: a native, local-only usage dashboard. No DOM, no shell, no stored cx.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Button, Input, InputState, Editor, EditorState, Popover } from "gpui-base";
-import { exec, appHome, home, machines, theme, settings, nextCommand, panes, props, run, readTextFile, writeTextFile, pickFolder, notify, spaces } from "herdr";
+import { checking, exec, appHome, home, machines, theme, settings, setShared, shared, nextCommand, panes, props, run, readTextFile, writeTextFile, pickFolder, notify, spaces } from "herdr";
 import {
   PALETTES,
   clampRefreshSeconds,
@@ -25,6 +25,13 @@ import {
   weekdayLabels,
 } from "./analytics.js";
 import { fleetMachines, readFleetMachine } from "./core/fleet.mjs";
+import {
+  QUOTA_RESUME_COMMAND_KEY,
+  QUOTA_RESUME_STATE_KEY,
+  QUOTA_RESUME_TICK_MS,
+  buildQuotaResumeView,
+  makeQuotaResumeCommand,
+} from "./core/quota-resume-view.mjs";
 import {
   G,
   H,
@@ -576,6 +583,8 @@ export default class Insights extends View {
     this.years = [Number(todayKey().slice(0, 4))];
     this.fleet = null;
     this.fleetTask = null;
+    this.quotaResumeTimer = null;
+    this.quotaResumeCmdSeq = 0;
 
     this.resolveRuntime(cx);
     this.commandTask = cx.spawn(async (commandCx) => {
@@ -629,6 +638,7 @@ export default class Insights extends View {
     try { this.refreshWatchdog?.cancel(); } catch { /* already gone */ }
     try { this.progressTimer?.cancel(); } catch { /* already gone */ }
     this.cancelScanContinue();
+    this.cancelQuotaResumeTimer();
     try { this.saveWatchdog?.cancel(); } catch { /* already gone */ }
     try { this.exportTask?.cancel(); } catch { /* already gone */ }
     this.exportTask = null;
@@ -1638,8 +1648,11 @@ export default class Insights extends View {
     this.scheduleDashboard(cx, { force: true });
   }
 
-  render(_cx) {
+  render(cx) {
     if (this.toolbarMode) return this.toolbar();
+    if (!this.snapshot || this.showSettings || !this.dashboard) {
+      this.cancelQuotaResumeTimer();
+    }
     const c = tokens(theme());
     const width = this.width || 960;
     const padding = width < 620 ? G.md : width < 900 ? G.lg : G.xl;
@@ -1651,7 +1664,7 @@ export default class Insights extends View {
     }
     if (!this.snapshot) content.push(this.initialState(c));
     else if (this.showSettings) content.push(this.settingsView(c));
-    else content.push(this.dashboardView(c));
+    else content.push(this.dashboardView(c, cx));
 
     return v_flex().id("insights-root").size_full().min_h(0).bg(c.canvas).text_color(c.text)
       .overflow_y_scrollbar()
@@ -1814,7 +1827,153 @@ export default class Insights extends View {
         .child(unreadable ? machine.reason : formatCompact(machine.totals?.total ?? 0)));
   }
 
-  dashboardView(c) {
+  cancelQuotaResumeTimer() {
+    try { this.quotaResumeTimer?.cancel(); } catch { /* already gone */ }
+    this.quotaResumeTimer = null;
+  }
+
+  syncQuotaResumeTimer(cx, active) {
+    if (!active || this.closed || this.toolbarMode || checking()) {
+      this.cancelQuotaResumeTimer();
+      return;
+    }
+    if (this.quotaResumeTimer || !cx?.timer?.every) return;
+    this.quotaResumeTimer = cx.timer.every(QUOTA_RESUME_TICK_MS, (timerCx) => {
+      if (this.closed || this.toolbarMode) {
+        this.cancelQuotaResumeTimer();
+        return;
+      }
+      timerCx.notify();
+    });
+  }
+
+  sendQuotaResumeCommand(action, payload, cx) {
+    this.quotaResumeCmdSeq = (this.quotaResumeCmdSeq ?? 0) + 1;
+    const command = makeQuotaResumeCommand(action, payload, Date.now(), this.quotaResumeCmdSeq);
+    setShared(QUOTA_RESUME_COMMAND_KEY, command);
+    cx?.notify?.();
+  }
+
+  /**
+   * Quota auto-resume: pure UI consumer of the `quota-resume` daemon via
+   * Herdr's shared state bus. Renders nothing when the daemon is not active.
+   */
+  quotaResumeCard(c, cx) {
+    if (this.toolbarMode) return null;
+    const view = buildQuotaResumeView(shared(QUOTA_RESUME_STATE_KEY), Date.now());
+    if (!view) {
+      this.syncQuotaResumeTimer(cx, false);
+      return null;
+    }
+    this.syncQuotaResumeTimer(cx, view.queue.length > 0);
+
+    const agentControls = view.agents.map((agent) => {
+      const pill = h_flex().gap(G.xs).items_center()
+        .child(div().size(6).flex_none().rounded_full().bg(agent.enabled ? c.done : c.dim))
+        .child(div().text_size(T.small).font_medium()
+          .text_color(agent.enabled ? c.text : c.mutedForeground)
+          .child(agent.label));
+      return button(
+        `ins-qr-agent-${agent.key}`,
+        pill,
+        (_event, clickCx) => this.sendQuotaResumeCommand("toggle-agent", { agent: agent.key, enabled: !agent.enabled }, clickCx),
+        c,
+        {
+          accessibilityLabel: `${agent.label} auto-resume ${agent.enabled ? "enabled" : "disabled"}`,
+          padding: 8,
+          tooltip: `${agent.enabled ? "Disable" : "Enable"} auto-resume for ${agent.label}`,
+          variant: agent.enabled ? "secondary" : "outline",
+        },
+      );
+    });
+
+    return card(c).gap(G.md)
+      .child(h_flex().w_full().flex_wrap().gap(G.md).items_center().justify_between()
+        .child(cardHeader("Quota auto-resume", view.subtitle, c))
+        .child(h_flex().gap(G.sm).items_center()
+          .child(mutedText(view.enabled ? "Active" : "Paused", c))
+          .child(toggleSwitch(
+            "ins-qr-enabled",
+            view.enabled,
+            (next) => this.sendQuotaResumeCommand("toggle-enabled", { enabled: next }),
+            c,
+            { label: view.enabled ? "Pause quota auto-resume" : "Resume quota auto-resume" },
+          ))))
+      .child(h_flex().w_full().flex_wrap().gap(G.xs).items_center()
+        .child(metaLabel("Agents", c))
+        .children(agentControls))
+      .when(view.queue.length > 0, (el) => el.child(v_flex().w_full().gap(G.sm)
+        .children(view.queue.map((item, index) => this.quotaResumeQueueRow(c, item, index, view.enabled)))))
+      .when(view.history.length > 0, (el) => el.child(v_flex().w_full().gap(G.xs).pt(G.xs)
+        .border_t(1).border_color(c.border)
+        .child(h_flex().w_full().items_center().justify_between().gap(G.sm)
+          .child(metaLabel("Recent history", c))
+          .child(button(
+            "ins-qr-clear-history",
+            "Clear",
+            (_event, clickCx) => this.sendQuotaResumeCommand("clear-history", {}, clickCx),
+            c,
+            { padding: 6, textSize: T.small, variant: "ghost" },
+          )))
+        .children(view.history.map((entry) => this.quotaResumeHistoryRow(c, entry)))));
+  }
+
+  quotaResumeQueueRow(c, item, index, enabled) {
+    const countdownColor = item.status === "resuming"
+      ? c.accent
+      : item.status === "paused" || !enabled
+        ? c.dim
+        : c.text;
+    const secondary = [item.detail, item.where].filter(Boolean).join(" · ");
+
+    return inset(c, G.sm, G.xs)
+      .child(h_flex().w_full().flex_wrap().gap(G.sm).items_center().justify_between()
+        .child(v_flex().flex_1().min_w(0).gap(2)
+          .child(h_flex().w_full().flex_wrap().gap(G.xs).items_center()
+            .child(div().text_size(T.small).font_semibold().text_color(c.text).child(item.agentLabel))
+            .child(div().px(6).py(1).rounded(R.control).bg(c.card).border_1().border_color(c.border)
+              .text_size(T.label).font_medium().text_color(c.mutedForeground).child(item.machineLabel))
+            .child(div().flex_1().min_w(0).text_size(T.body).font_medium().text_color(c.text)
+              .truncate().tooltip(item.title).child(item.title)))
+          .when(Boolean(secondary), (el) => el.child(mutedText(secondary, c))))
+        .child(h_flex().flex_wrap().gap(G.xs).items_center()
+          .child(div().text_size(T.small).font_semibold().text_color(countdownColor).child(item.countdown))
+          .child(button(
+            `ins-qr-resume-${index}`,
+            "Resume now",
+            (_event, clickCx) => this.sendQuotaResumeCommand("resume-now", { address: item.address }, clickCx),
+            c,
+            { disabled: item.status === "resuming", padding: 8, textSize: T.small, variant: "outline" },
+          ))
+          .child(button(
+            `ins-qr-cancel-${index}`,
+            "Cancel",
+            (_event, clickCx) => this.sendQuotaResumeCommand("cancel", { address: item.address }, clickCx),
+            c,
+            { padding: 8, textSize: T.small, variant: "ghost" },
+          ))));
+  }
+
+  quotaResumeHistoryRow(c, entry) {
+    const outcomeColor = entry.outcomeTone === "done"
+      ? c.done
+      : entry.outcomeTone === "destructive"
+        ? c.destructive
+        : c.dim;
+    const tooltip = entry.detail ? `${entry.title} — ${entry.detail}` : entry.title;
+
+    return h_flex().w_full().flex_wrap().gap(G.sm).items_center().justify_between()
+      .child(h_flex().flex_1().min_w(0).gap(G.xs).items_center()
+        .child(div().text_size(T.small).font_medium().text_color(c.mutedForeground).child(entry.agentLabel))
+        .child(div().text_size(T.label).text_color(c.dim).child(entry.machineLabel))
+        .child(div().flex_1().min_w(0).text_size(T.small).text_color(c.text)
+          .truncate().tooltip(tooltip).child(entry.title)))
+      .child(h_flex().gap(G.sm).items_center()
+        .child(div().text_size(T.small).font_medium().text_color(outcomeColor).child(entry.outcomeLabel))
+        .when(Boolean(entry.age), (el) => el.child(mutedText(entry.age, c))));
+  }
+
+  dashboardView(c, cx) {
     const derived = this.dashboard;
     if (!derived) {
       const retry = (id, primary) => button(id, "Retry", (_event, clickCx) => {
@@ -1837,10 +1996,12 @@ export default class Insights extends View {
     }
     const { config, rowCount, range, lifetime, peak, streaks, heatmap, leaders, selectedDay, selectedTotals, selectedTop, years } = derived;
     const fleetCard = this.fleetCard(c);
+    const quotaResumeCard = this.quotaResumeCard(c, cx);
 
     return v_flex().w_full().gap(G.lg)
       .child(this.metricStrip(c, lifetime, peak, streaks))
       .when(Boolean(fleetCard), (el) => el.child(fleetCard))
+      .when(Boolean(quotaResumeCard), (el) => el.child(quotaResumeCard))
       .when(rowCount === 0, (el) => el.child(this.emptyNotice(c, config)))
       .child(this.sectionHeader("Token usage", c))
       .child(this.heatmapCard(c, config, heatmap, selectedDay, range))

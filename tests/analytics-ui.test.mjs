@@ -6,6 +6,7 @@ const mainSource = await readFile(new URL("../mods/insights/main.js", import.met
 const analyticsSource = await readFile(new URL("../mods/insights/analytics.js", import.meta.url), "utf8");
 const uiSource = await readFile(new URL("../mods/insights/ui.js", import.meta.url), "utf8");
 const fleetSource = await readFile(new URL("../mods/insights/core/fleet.mjs", import.meta.url), "utf8");
+const quotaResumeViewSource = await readFile(new URL("../mods/insights/core/quota-resume-view.mjs", import.meta.url), "utf8");
 const dataUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 const analyticsUrl = dataUrl(analyticsSource);
 const analytics = await import(analyticsUrl);
@@ -112,6 +113,9 @@ const uiNames = Object.keys(ui).join(", ");
 const fleetUrl = dataUrl(fleetSource);
 const fleet = await import(fleetUrl);
 const fleetNames = Object.keys(fleet).join(", ");
+const quotaResumeViewUrl = dataUrl(quotaResumeViewSource);
+const quotaResumeView = await import(quotaResumeViewUrl);
+const quotaResumeViewNames = Object.keys(quotaResumeView).join(", ");
 
 const transformedMain = mainSource
   .replace(/^import \{ View, div, svg \} from "gpui-kit";$/m, `const View = class View {};
@@ -157,7 +161,10 @@ const panes = () => globalThis.__insightsTestHerdr.panes();
 const props = () => globalThis.__insightsTestHerdr.props();
 const run = (...args) => globalThis.__insightsTestHerdr.run(...args);
 const spaces = () => globalThis.__insightsTestHerdr.spaces();
-const machines = () => globalThis.__insightsTestHerdr?.machines?.() ?? [];`,
+const machines = () => globalThis.__insightsTestHerdr?.machines?.() ?? [];
+const shared = (key) => globalThis.__insightsTestHerdr?.shared?.(key);
+const setShared = (key, value) => globalThis.__insightsTestHerdr?.setShared?.(key, value) ?? null;
+const checking = () => globalThis.__insightsTestHerdr?.checking?.() ?? false;`,
   )
   .replace(
     /^import \{[\s\S]*?\} from "\.\/analytics\.js";$/m,
@@ -166,6 +173,10 @@ const machines = () => globalThis.__insightsTestHerdr?.machines?.() ?? [];`,
   .replace(
     /^import \{[\s\S]*?\} from "\.\/core\/fleet\.mjs";$/m,
     `const { ${fleetNames} } = await import("${fleetUrl}");`,
+  )
+  .replace(
+    /^import \{[\s\S]*?\} from "\.\/core\/quota-resume-view\.mjs";$/m,
+    `const { ${quotaResumeViewNames} } = await import("${quotaResumeViewUrl}");`,
   )
   .replace(
     /^import \{[\s\S]*?\} from "\.\/ui\.js";$/m,
@@ -199,12 +210,23 @@ function useHerdr({ readTextFile, execResult } = {}) {
   const state = {
     commands: [], execCalls: [], panes: [], props: {}, runtimeReads: [], spaces: [], machines: [],
     exportFolder: "/exports", exportWrites: [], notifications: [],
+    sharedStore: new Map(), sharedReads: [], sharedWrites: [], checking: false,
   };
   state.herdr = {
     appHome: () => "/app",
     home: () => "/home",
     theme: () => ({}),
     settings: () => ({}),
+    checking: () => state.checking,
+    shared: (key) => {
+      state.sharedReads.push(key);
+      return state.sharedStore.get(key);
+    },
+    setShared: (key, value) => {
+      state.sharedWrites.push({ key, value });
+      state.sharedStore.set(key, value);
+      return null;
+    },
     nextCommand: () => new Promise(() => {}),
     panes: () => state.panes,
     props: () => state.props,
@@ -775,6 +797,183 @@ test("the dashboard renders before any fleet reading arrives", () => {
   }));
   instance.fleet = null;
   assert.doesNotThrow(() => instance.dashboardView({ text: "#eee", dim: "#888" }));
+});
+
+test("quota auto-resume card stays hidden without daemon state and never runs in toolbar mode", () => {
+  const state = useHerdr();
+  const { cx, calls } = liveCx();
+
+  const toolbar = new Insights();
+  state.props = { mode: "toolbar" };
+  toolbar.init({}, cx);
+  toolbar.render(cx);
+  assert.deepEqual(state.sharedReads, [], "toolbar mode must never read shared quota-resume state");
+  assert.deepEqual(calls.timers, [], "toolbar mode must never start timers");
+
+  state.props = {};
+  const instance = blankInstance();
+  assert.equal(instance.quotaResumeCard({ text: "#eee", dim: "#888" }, cx), null);
+  assert.deepEqual(calls.timers, []);
+
+  state.sharedStore.set("quota-resume.state", { version: 2, enabled: true, queue: [], history: [] });
+  assert.equal(instance.quotaResumeCard({ text: "#eee", dim: "#888" }, cx), null);
+  assert.deepEqual(calls.timers, []);
+});
+
+test("quota auto-resume card renders queue/history, emits commands, and manages countdown timer lifecycle", () => {
+  const state = useHerdr();
+  const now = Date.now();
+  state.sharedStore.set("quota-resume.state", {
+    version: 1,
+    enabled: true,
+    updatedAtMs: now,
+    lastHandledCommandId: null,
+    settings: {
+      delaySec: 60,
+      agents: { claude: true, codex: false, opencode: true },
+      prompt: "Continue.",
+    },
+    queue: [
+      {
+        address: "linux/t3n",
+        machine: "linux",
+        agent: "claude",
+        title: "Herdr layout options",
+        where: "ISW / pr 318",
+        detectedAtMs: now - 60_000,
+        resetsAtMs: now + 840_000,
+        resumeAtMs: now + 900_000,
+        resetSource: "transcript",
+        reason: "five_hour rate limit",
+        status: "waiting",
+        attempts: 0,
+      },
+    ],
+    history: [
+      {
+        id: "h-1",
+        address: "t2c",
+        machine: null,
+        agent: "codex",
+        title: "Local refactor",
+        outcome: "resumed",
+        detail: "Sent prompt",
+        atMs: now - 120_000,
+      },
+    ],
+  });
+
+  const cancelledTimers = [];
+  const timers = [];
+  let notifyCount = 0;
+  const cx = {
+    notify() { notifyCount += 1; },
+    timer: {
+      every(ms, fn) {
+        const timer = { ms, fn, cancel() { cancelledTimers.push(timer); } };
+        timers.push(timer);
+        return timer;
+      },
+    },
+  };
+
+  const instance = blankInstance();
+  instance.sourceInputs = new Map();
+  const c = ui.tokens({
+    background: "#101010",
+    surface: "#181818",
+    raised: "#222222",
+    border: "#333333",
+    input: "#3b3b3b",
+    foreground: "#f5f5f5",
+    muted: "#9a9a9a",
+    dim: "#707070",
+    accent: "#5aa7ff",
+    solid: "#f5f5f5",
+    solid_foreground: "#111111",
+    blocked: "#ff6b6b",
+    done: "#5bd48a",
+  });
+
+  // During checking(), no countdown timer is started.
+  state.checking = true;
+  assert.ok(instance.quotaResumeCard(c, cx));
+  assert.equal(timers.length, 0, "no timer starts during checking()");
+  state.checking = false;
+
+  const cardNode = instance.quotaResumeCard(c, cx);
+  assert.ok(cardNode);
+  assert.equal(timers.length, 1, "active queue starts one countdown refresh timer");
+  assert.equal(timers[0].ms, 15_000);
+
+  // Tick only notifies.
+  timers[0].fn(cx);
+  assert.equal(notifyCount, 1);
+
+  const texts = [];
+  const buttons = [];
+  const toggles = [];
+  const walk = (node) => {
+    if (typeof node === "string") { texts.push(node); return; }
+    if (!node || typeof node !== "object") return;
+    const onClick = node.calls?.find(([name]) => name === "on_click");
+    const onChange = node.calls?.find(([name]) => name === "on_change");
+    const a11y = node.calls?.find(([name]) => name === "accessibility_label")?.[1]?.[0];
+    if (onClick) buttons.push({ label: a11y, fn: onClick[1][0] });
+    if (onChange) toggles.push({ label: a11y, fn: onChange[1][0] });
+    for (const child of node.childNodes ?? []) walk(child);
+  };
+  walk(cardNode);
+  const rendered = texts.join(" ");
+  assert.match(rendered, /Quota auto-resume/);
+  assert.match(rendered, /Herdr layout options/);
+  assert.match(rendered, /linux/);
+  assert.match(rendered, /five_hour rate limit/);
+  assert.match(rendered, /Local refactor/);
+  assert.match(rendered, /Resumed/);
+
+  // Emit all 5 commands through UI controls.
+  toggles[0].fn(false, cx);
+  buttons.find((b) => /Codex/.test(b.label)).fn({}, cx);
+  buttons.find((b) => b.label === "Resume now").fn({}, cx);
+  buttons.find((b) => b.label === "Cancel").fn({}, cx);
+  buttons.find((b) => b.label === "Clear").fn({}, cx);
+
+  assert.deepEqual(
+    state.sharedWrites.map((w) => [w.key, w.value.action]),
+    [
+      ["quota-resume.command", "toggle-enabled"],
+      ["quota-resume.command", "toggle-agent"],
+      ["quota-resume.command", "resume-now"],
+      ["quota-resume.command", "cancel"],
+      ["quota-resume.command", "clear-history"],
+    ],
+  );
+  assert.equal(state.sharedWrites[0].value.enabled, false);
+  assert.equal(state.sharedWrites[1].value.agent, "codex");
+  assert.equal(state.sharedWrites[1].value.enabled, true);
+  assert.equal(state.sharedWrites[2].value.address, "linux/t3n");
+  assert.equal(state.sharedWrites[3].value.address, "linux/t3n");
+
+  // Emptying queue cancels the countdown timer immediately.
+  state.sharedStore.set("quota-resume.state", {
+    ...state.sharedStore.get("quota-resume.state"),
+    queue: [],
+  });
+  assert.ok(instance.quotaResumeCard(c, cx));
+  assert.equal(cancelledTimers.length, 1);
+  assert.equal(instance.quotaResumeTimer, null);
+
+  // Restart with a queued item and confirm close() cancels it too.
+  state.sharedStore.set("quota-resume.state", {
+    ...state.sharedStore.get("quota-resume.state"),
+    queue: [{ address: "t1", machine: null, agent: "claude", title: "X", resumeAtMs: now + 60_000, status: "waiting" }],
+  });
+  assert.ok(instance.quotaResumeCard(c, cx));
+  assert.equal(timers.length, 2);
+  instance.close();
+  assert.equal(cancelledTimers.length, 2);
+  assert.equal(instance.quotaResumeTimer, null);
 });
 
 test("heatmap month labels keep their spans while partial labels cannot wrap", () => {
