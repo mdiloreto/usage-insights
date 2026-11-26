@@ -116,7 +116,7 @@ sign-in already on the machine being read.
 - **Another machine:** its providers are not asked until you install the quota
   helper there (Linux: `sh scripts/install-quota.sh`, then the same with
   `enroll`) and add that grant by hand to the viewer's
-  `data/fleet-quota/enrollments.json`. While the bar or the dashboard is loaded,
+  `<app home>/data/fleet-quota/enrollments.json`. While the bar or the dashboard is loaded,
   the viewer then asks the helper only about the providers in the grant:
   - Codex through `codex app-server`, falling back to the Omarchy collector's
     record.
