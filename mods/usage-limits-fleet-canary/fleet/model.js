@@ -72,6 +72,31 @@ function remoteStates(machine, now, prefs, providers) {
   }));
 }
 
+const isAgy = (group) => group.providerId === "agy";
+
+// What one machine's Antigravity can offer the bar, or null where it never had a reading.
+function agyReading(host, state) {
+  const group = host.groups.find(isAgy);
+  if (!group) return null;
+  if (group.segments.length) return { host, group, live: true, observedAt: state.report.observedAt };
+  const times = [state?.report, state?.lastGood, state?.historyDetail]
+    .filter((reading) => reading?.windows.length).map((reading) => reading.observedAt);
+  return times.length ? { host, group, live: false, observedAt: Math.max(...times) } : null;
+}
+
+// Which machines the bar shows must not hide Antigravity: when none of them has a current reading, the
+// freshest one elsewhere joins under its own machine's chip. A dated one joins only if they hold none at all.
+function withLentAgy(shown, readings) {
+  const onBar = readings.filter(({ host }) => shown.includes(host));
+  const live = readings.filter((reading) => reading.live);
+  if (onBar.some((reading) => reading.live)) return shown;
+  const lenders = live.length || onBar.length ? live : readings;
+  if (!lenders.length) return shown;
+  const { host: { label, chip }, group } = lenders.reduce((best, next) => (next.observedAt > best.observedAt ? next : best));
+  // No route: only this computer's own segment has the null route that keeps session numbers on the bar.
+  return [...shown.map((host) => ({ ...host, groups: host.groups.filter((g) => !isAgy(g)) })), { label, chip, groups: [group] }];
+}
+
 export function fleetModels(projection, prefs, selection, localSource, identity = NO_IDENTITY) {
   const { mode, selected, activeRemote, activeMachine, machines, choices } = selection;
   const now = projection.now;
@@ -103,7 +128,9 @@ export function fleetModels(projection, prefs, selection, localSource, identity 
   const groups = mode === "combined"
     ? [local, selected ? groupFor(selected) : { label: choices.length ? "Choose remote" : "No remote available", groups: [] }]
     : [activeRemote ? groupFor(activeRemote) : activeMachine === null ? local : { label: "Active machine unknown", groups: [] }];
-  return { local, remotes, groups, selection };
+  const agyReadings = [agyReading(local, states.agy), ...remotes.map((host) => agyReading(host, host.machine.states?.agy))];
+  const bar = isShown(prefs, "agy") ? withLentAgy(groups, agyReadings.filter(Boolean)) : groups;
+  return { local, remotes, groups: bar, selection };
 }
 
 const labelWidth = (label) => Math.ceil(7.5 * label.length + 8);
@@ -114,7 +141,7 @@ const hostWidth = (host, density, named) => labelWidth(hostChip(host)) + CHIP_FR
 
 export function fleetBar(models, width, numbers, showBars) {
   const { groups } = models;
-  if (!groups.includes(models.local)) numbers = [];
+  if (!groups.some((host) => host.route === null)) numbers = [];
   const sessionWidth = sessionNumbersWidth(numbers);
   const room = width - 24 - sessionWidth - 28;
   const fits = (hosts, density, named = true) => hosts.reduce((sum, host) => sum + hostWidth(host, density, named) + 8, 0) <= room;

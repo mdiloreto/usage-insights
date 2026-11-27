@@ -593,3 +593,131 @@ test("this computer's fleet segment omits Antigravity until a record is found", 
     assert.ok(stub.findById(tree, "ul-remote-refresh-arch-agy"), `${name}: the remote machine keeps it`);
   }
 });
+
+const agyWindows = (percent) => [win("session", "5h", "5-hour", percent, NOW + 3600, 18000),
+  win("weekly_all", "wk", "Weekly", percent, NOW + 3 * DAY, 604800)];
+const liveAgy = (age, percent = 10) => item("agy", { current: current("host", NOW - age, agyWindows(percent)) });
+const datedAgy = (age) => item("agy", { status: "stale", reason: "stale", history: current("host", NOW - age, agyWindows(5)) });
+const unreadAgy = item("agy", { status: "failed", reason: "failed" });
+const machine = (route, agyItem) => linuxHost({ route, label: route,
+  providers: [linuxHost().providers[0], ...(agyItem ? [agyItem] : [])] });
+const localAgy = (age, change = {}) => answered(localRecord({ limitsFetchedAt: (NOW - age) * 1000, ...change }));
+const datedLocalAgy = (age) => localAgy(age, { limitsStale: true });
+const noLocalAgy = () => answered("", NOT_INSTALLED);
+
+function barFleet(remotes, { local = {}, focused = null, mode = "follow", selected, prefs = effectivePrefs() } = {}) {
+  const projection = project(...remotes);
+  const saved = { mode, selected: selected ? { route: selected, label: selected } : null, collapsed: [] };
+  return harness(projection, saved).adapter.model(projection, focused, prefs, { local, now: NOW }, chipsFor("laptop", "Linux"));
+}
+
+const onBar = (models) => models.groups.map((h) => [h.chip ?? h.label, h.groups.map((g) => g.providerId)]);
+const lent = (models) => models.groups.at(-1);
+const MAC = "Mac · laptop";
+
+test("Follow Space in a local space lends a remote machine's current Antigravity reading", () => {
+  const models = barFleet([machine("arch", liveAgy(MIN, 30))], { local: noLocalAgy() });
+  assert.deepEqual(onBar(models), [[MAC, ["claude", "codex"]], ["Linux · arch", ["agy"]]]);
+  assert.deepEqual(lent(models).groups[0].segments.map((s) => [s.short, s.text]), [["5h", "30%"], ["wk", "30%"]]);
+  assert.deepEqual(models.local.groups.map((g) => g.providerId), ["claude", "codex"]);
+  assert.deepEqual(models.remotes[0].groups.map((g) => g.providerId), ["claude", "codex", "agy"]);
+  const text = barText(fleetBar(models, 2400, [], true));
+  assert.ok(text.includes("Linux · arch") && text.includes("Antigravity") && text.includes("30%"));
+});
+
+test("Follow Space in a remote space lends this computer's reading and leaves the details alone", () => {
+  const models = barFleet([machine("arch", datedAgy(DAY))], { local: localAgy(MIN), focused: "arch" });
+  assert.deepEqual(onBar(models), [["Linux · arch", ["claude", "codex"]], [MAC, ["agy"]]]);
+  assert.deepEqual(lent(models).groups[0].segments.map((s) => s.text), ["40%", "25%"]);
+  assert.deepEqual(models.local.groups.map((g) => g.providerId), ["claude", "codex", "agy"]);
+  assert.deepEqual(models.remotes[0].groups.map((g) => g.providerId), ["claude", "codex", "agy"]);
+  assert.ok(detail(models.local, "agy") && detail(models.remotes[0], "agy"));
+});
+
+test("nothing is lent while a machine on the bar has a current Antigravity reading", () => {
+  const remotes = [machine("arch", liveAgy(MIN)), machine("studio", liveAgy(5))];
+  const without = barFleet(remotes, { local: noLocalAgy() });
+  assert.deepEqual(lent(without).groups.map((g) => g.providerId), ["agy"], "a bar without a reading borrows one");
+  const local = barFleet(remotes, { local: localAgy(10 * MIN) });
+  assert.deepEqual(local.groups, [local.local], "an older reading on the bar still wins");
+  const focused = barFleet(remotes, { local: localAgy(0), focused: "arch" });
+  assert.deepEqual(focused.groups, [focused.remotes[0]]);
+  const combined = barFleet(remotes, { local: noLocalAgy(), mode: "combined", selected: "arch" });
+  assert.deepEqual(combined.groups, [combined.local, combined.remotes[0]]);
+});
+
+test("the freshest current reading is lent, ahead of any newer dated one", () => {
+  const shown = machine("arch");
+  const pick = (remotes, local) => barFleet([shown, ...remotes], { local, focused: "arch" });
+  const three = [machine("studio", liveAgy(10 * MIN, 11)), machine("mini", liveAgy(30, 22))];
+  assert.deepEqual(onBar(pick(three, localAgy(5 * MIN))), [["Linux · arch", ["claude", "codex"]], ["Linux · mini", ["agy"]]]);
+  assert.equal(lent(pick(three, localAgy(10))).chip, MAC);
+  const mixed = [machine("studio", liveAgy(10 * MIN)), machine("mini", datedAgy(5))];
+  assert.equal(lent(pick(mixed, datedLocalAgy(1))).chip, "Linux · studio");
+});
+
+test("a dated Antigravity reading is lent only when no machine on the bar holds one", () => {
+  const remotes = [machine("arch", datedAgy(15 * DAY)), machine("studio", datedAgy(DAY))];
+  const borrowed = barFleet(remotes, { local: noLocalAgy() });
+  assert.deepEqual(onBar(borrowed), [[MAC, ["claude", "codex"]], ["Linux · studio", ["agy"]]]);
+  assert.deepEqual([lent(borrowed).groups[0].mark, lent(borrowed).groups[0].segments], ["—", []]);
+  const heldHere = barFleet(remotes, { local: datedLocalAgy(10 * DAY) });
+  assert.deepEqual(heldHere.groups, [heldHere.local]);
+  const heldThere = barFleet(remotes, { local: datedLocalAgy(MIN), focused: "arch" });
+  assert.deepEqual(heldThere.groups, [heldThere.remotes[0]]);
+  const fromHere = barFleet([machine("arch")], { local: datedLocalAgy(MIN), focused: "arch" });
+  assert.deepEqual(onBar(fromHere), [["Linux · arch", ["claude", "codex"]], [MAC, ["agy"]]]);
+  assert.equal(lent(fromHere).groups[0].mark, "—");
+});
+
+test("a machine that never had an Antigravity reading neither lends one nor keeps one off the bar", () => {
+  const neverRead = answered("{}");
+  const borrowed = barFleet([machine("arch", datedAgy(DAY))], { local: neverRead });
+  assert.deepEqual(onBar(borrowed), [[MAC, ["claude", "codex"]], ["Linux · arch", ["agy"]]]);
+  const nothing = barFleet([machine("arch", unreadAgy)], { local: neverRead });
+  assert.deepEqual(nothing.groups, [nothing.local]);
+  assert.equal(group(nothing.local, "agy").mark, "—");
+});
+
+test("Local + Remote lends Antigravity from a machine that is not on the bar", () => {
+  const remotes = [machine("arch", datedAgy(DAY)), machine("studio", liveAgy(MIN))];
+  const picked = barFleet(remotes, { local: noLocalAgy(), mode: "combined", selected: "arch" });
+  assert.deepEqual(onBar(picked), [[MAC, ["claude", "codex"]], ["Linux · arch", ["claude", "codex"]], ["Linux · studio", ["agy"]]]);
+  const unpicked = barFleet(remotes, { local: noLocalAgy(), mode: "combined" });
+  assert.deepEqual(onBar(unpicked), [[MAC, ["claude", "codex"]], ["Choose remote", []], ["Linux · studio", ["agy"]]]);
+});
+
+test("a hidden Antigravity is neither lent nor removed", () => {
+  const remotes = [machine("arch", datedAgy(DAY)), machine("studio", liveAgy(MIN))];
+  const options = { local: noLocalAgy(), focused: "arch" };
+  assert.equal(lent(barFleet(remotes, options)).chip, "Linux · studio", "shown Antigravity is lent");
+  const hidden = barFleet(remotes, { ...options, prefs: effectivePrefs({ hidden: ["agy"] }) });
+  assert.deepEqual(hidden.groups, [hidden.remotes[0]]);
+  assert.deepEqual(onBar(hidden), [["Linux · arch", ["claude", "codex", "agy"]]]);
+});
+
+test("session numbers follow this computer's own segment, never a lent entry", () => {
+  const numbers = [{ level: "ok", text: "ctx 12%" }];
+  const trimmed = barFleet([machine("arch"), machine("studio", liveAgy(MIN))],
+    { local: datedLocalAgy(DAY), mode: "combined", selected: "arch" });
+  assert.deepEqual(onBar(trimmed), [[MAC, ["claude", "codex"]], ["Linux · arch", ["claude", "codex"]], ["Linux · studio", ["agy"]]]);
+  const borrowed = barFleet([machine("arch")], { local: localAgy(MIN), focused: "arch" });
+  assert.equal(lent(borrowed).chip, MAC);
+  for (const width of [2400, 600]) {
+    assert.deepEqual(fleetBar(trimmed, width, numbers, true).numbers, numbers, `own segment at ${width}`);
+    assert.deepEqual(fleetBar(borrowed, width, numbers, true).numbers, [], `lent only at ${width}`);
+  }
+  assert.ok(barText(fleetBar(trimmed, 2400, numbers, true)).includes("ctx 12%"));
+});
+
+test("a lent entry keeps its machine chip at every width, including the labels-only fallback", () => {
+  const models = barFleet([machine("arch"), machine("studio", liveAgy(MIN))], { local: noLocalAgy(), focused: "arch" });
+  const stages = new Set();
+  for (let width = 60; width <= 1600; width += 4) {
+    const fleet = fleetBar(models, width, [], true);
+    stages.add(fleet.labels ? "labels" : "groups");
+    if (fleet.labels) assert.deepEqual(fleet.labels, ["Linux · arch", "Linux · studio"], `width ${width}`);
+    else assert.ok(barText(fleet).includes("Linux · studio") && barText(fleet).includes("10%"), `width ${width}`);
+  }
+  assert.deepEqual([...stages].sort(), ["groups", "labels"]);
+});
