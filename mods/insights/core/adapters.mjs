@@ -902,39 +902,38 @@ function parseCodex(record, ctx) {
     // last_token_usage would count a response twice whenever the two fail to
     // pair, so the delta minus pending record usage applies instead. Counts read
     // before the first record are not revisited, so a line counts the same in an
-    // appended scan and in a copy of the rollout.
+    // appended scan and in a copy of the rollout. Only the amount differs from
+    // the delta path: the dedup identity is shared, so re-read history lands on
+    // the keys already stored (toolkit#165 changes them).
     const perResponse = !state.modern && Boolean(totals && last);
     let raw;
     let identityTail;
     let reset = false;
 
-    if (perResponse) {
-      const current = codexRawTotals(totals);
-      // An unmoved total reports no new response: a re-emission, or just after a
-      // fork boundary a repeat of the parent's last one (toolkit#165 counts it).
-      const previous = state.legacyTotals;
-      const unmoved = isPlainObject(previous)
-        && Object.keys(current).every((key) => current[key] === previous[key]);
-      raw = unmoved ? {} : last;
-      state.legacyTotals = current;
-      // No timestamp: a later re-emission of the same response must dedupe.
-      identityTail = [
-        "legacy-response",
-        asString(payload.turn_id ?? payload.root_turn_id, ""),
-        ...Object.values(current),
-        ...Object.values(codexRawTotals(last)),
-      ];
-    } else if (totals) {
+    if (totals) {
       const current = codexRawTotals(totals);
       const previous = isPlainObject(state.legacyTotals)
         ? state.legacyTotals
         : null;
-      // A reset belongs to the whole counter vector, not just the fields that
-      // decreased. Other fields may already exceed their old values on restart.
-      reset = Boolean(previous && Object.keys(current).some((key) => current[key] < toNonNegInt(previous[key])));
-      raw = {};
-      for (const key of Object.keys(current)) {
-        raw[key] = !previous || reset ? current[key] : current[key] - toNonNegInt(previous[key]);
+      if (perResponse) {
+        // An unmoved total reports no new response: a re-emission, or just after
+        // a fork boundary a repeat of the parent's last one (toolkit#165 counts
+        // it). Interleaved chains also re-emit an earlier response later.
+        const unmoved = previous
+          && Object.keys(current).every((key) => current[key] === previous[key]);
+        const response = makeDedupKey("codex", asString(payload.turn_id ?? payload.root_turn_id, ""),
+          ...Object.values(current), ...Object.values(codexRawTotals(last)));
+        if (!isPlainObject(state.countedResponses)) state.countedResponses = {};
+        raw = unmoved || state.countedResponses[response] ? {} : last;
+        state.countedResponses[response] = true;
+      } else {
+        // A reset belongs to the whole counter vector, not just the fields that
+        // decreased. Other fields may already exceed their old values on restart.
+        reset = Boolean(previous && Object.keys(current).some((key) => current[key] < toNonNegInt(previous[key])));
+        raw = {};
+        for (const key of Object.keys(current)) {
+          raw[key] = !previous || reset ? current[key] : current[key] - toNonNegInt(previous[key]);
+        }
       }
       state.legacyTotals = current;
       identityTail = [
@@ -971,7 +970,7 @@ function parseCodex(record, ctx) {
     }
     if (!tokens.nonzero) return;
 
-    let dedupKey = (state.forkReplay || perResponse) && asString(payload.response_id, "")
+    let dedupKey = state.forkReplay && asString(payload.response_id, "")
       ? makeDedupKey("codex", "response", payload.response_id)
       : makeDedupKey("codex", session, ...identityTail);
     const observationKey = dedupKey;

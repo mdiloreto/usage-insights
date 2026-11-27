@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { dedupKeyFor, loadStore } from "../mods/insights/core/store.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const collector = path.join(here, "..", "mods", "insights", "collector.mjs");
@@ -566,6 +567,19 @@ test("Codex interleaved cumulative counters count each response once, not a rese
   // 110 + 130 + 121 + 140: a lower branch total is one response, and its later
   // re-emission is a duplicate.
   assert.equal(totalTokens(await codexRows("codex-concurrent-counters.jsonl")), 501);
+});
+
+// A rollout moved or compressed before a parser upgrade leaves its old rows in
+// the store; the re-read copy must land on the same keys, not beside them.
+test("Codex per-response counts keep the identity stored history already uses", async () => {
+  const context = await env();
+  await placeFixture(context, ".codex/sessions/rollout.jsonl", "codex-concurrent-counters.jsonl");
+  await configure(context, [
+    { id: "codex", label: "Codex", adapter: "codex", enabled: true, roots: ["~/.codex/sessions"] },
+  ]);
+  const { store } = await loadStore(context.store);
+  const stored = dedupKeyFor("codex", "codex:codex-concurrent", "legacy", "2026-03-09T09:00:02.000Z", 100, 0, 0, 10, 0);
+  assert.ok(Object.hasOwn(store.dedup, stored));
 });
 
 test("Codex paginated fork counts its own responses, not the inherited parent total", async () => {
