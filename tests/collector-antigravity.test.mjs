@@ -364,6 +364,14 @@ test("Antigravity skips unusable step usage and dates a step without a timestamp
   assert.match(first.warnings.join(" "), /1 generations use session time/);
 });
 
+test("Antigravity counts once a step whose generation record has no response ID", async (t) => {
+  const context = await env(t);
+  const { db } = database(context, "conv", [{ idx: 0, data: generation({ id: "" }).data, usage: generation().usage }]);
+  db.close();
+  const first = await run(context, true);
+  assert.deepEqual(first.rows.map((r) => [r.messages, r.tokens.total]), [[1, 37]]);
+});
+
 test("Antigravity retains step-only history when its step becomes unreadable", async (t) => {
   const context = await env(t); const { db, file } = database(context, "conv", []);
   addStep(db, 1, { usage: generation().usage });

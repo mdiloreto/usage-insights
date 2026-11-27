@@ -11,7 +11,7 @@ reasoning tokens. Unknown fields exercise fixed32, fixed64 and the maximum
 uint64 without interpreting them as usage.
 
 The mapping was measured on real `agy` 1.5.18 data and agrees with the
-[current tokscale parser](https://github.com/junhoyeo/tokscale/blob/main/crates/tokscale-core/src/sessions/antigravity_cli.rs).
+[tokscale parser](https://github.com/junhoyeo/tokscale/blob/04e1e3802388070005328047579220c80c2350bd/crates/tokscale-core/src/sessions/antigravity_cli.rs).
 
 This checks wire decoding and accounting, not compatibility with every Antigravity
 version. The reference is not an official schema; no real-session fixture is supplied.

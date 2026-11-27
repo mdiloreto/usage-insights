@@ -4,7 +4,8 @@
  * is uncached input, #3 is total output (#9 reasoning plus #10 response text),
  * #5 is cache read, #11 is response ID. Some responses appear only in
  * steps.metadata: usage at #9, or at #28.#2 (without #1) on checkpoint steps.
- * Reference: https://github.com/junhoyeo/tokscale/blob/main/crates/tokscale-core/src/sessions/antigravity_cli.rs
+ * Field mapping reference (generation records only):
+ * https://github.com/junhoyeo/tokscale/blob/04e1e3802388070005328047579220c80c2350bd/crates/tokscale-core/src/sessions/antigravity_cli.rs
  */
 import path from "node:path";
 import { stat } from "node:fs/promises";
@@ -271,6 +272,8 @@ export async function scanAntigravityDb(store, source, file, sink, stats, option
     };
     const models = new Map();
     const countedIds = new Set();
+    // A generation record without a response ID still counts its step's response.
+    const countedSteps = new Set();
     let reason = await eachRow(`SELECT idx, ${limited("data")} AS data FROM gen_metadata ORDER BY idx`, (record) => {
       let generations;
       try { generations = decodeAntigravityGeneration(record.data, models); } catch { counts.malformed += 1; return; }
@@ -283,7 +286,10 @@ export async function scanAntigravityDb(store, source, file, sink, stats, option
           try { created = stepTimestamp(step?.data, generation.responseId); } catch { /* use documented fallback */ }
         }
         if (generation.responseId) countedIds.add(generation.responseId);
-        else counts.missingId += 1;
+        else {
+          counts.missingId += 1;
+          countedSteps.add(generation.step);
+        }
         add(created, generation.model, generation.tokens, generation.responseId
           ? makeDedupKey("antigravity", "response", generation.responseId)
           : makeDedupKey("antigravity", "generation", conversation, record.idx, index));
@@ -305,12 +311,12 @@ export async function scanAntigravityDb(store, source, file, sink, stats, option
     };
     // Checkpoint copies wait for every #9 usage, which alone carries the model id.
     const checkpoints = [];
-    reason = await eachRow(`SELECT step_type, ${limited("metadata")} AS data FROM steps WHERE metadata IS NOT NULL ORDER BY idx`, (record) => {
+    reason = await eachRow(`SELECT idx, step_type, ${limited("metadata")} AS data FROM steps WHERE metadata IS NOT NULL ORDER BY idx`, (record) => {
       let step;
       const malformed = () => { counts.malformed += 1; };
       try { step = decodeStep(record.data, record.step_type, malformed); } catch { malformed(); return; }
       if (!step) return;
-      addStepUsage(step.direct, step.created);
+      if (!countedSteps.has(record.idx)) addStepUsage(step.direct, step.created);
       if (step.checkpoint) checkpoints.push(step);
     });
     if (reason) return interrupted(reason);
