@@ -1,9 +1,10 @@
 /**
  * Reverse-engineered CLI schema, not a vendor API: gen_metadata #1.#19 is the
- * model and #1.#4 is usage. Usage #1+#2 is uncached input, #3 is total output
- * (including #10 reasoning), #5 is cache read, #9 is text output, #11 is response ID.
- * References: https://github.com/junhoyeo/tokscale/pull/713
- *             https://github.com/robinebers/openusage/pull/1139
+ * model and #1.#4 is usage. Usage #1 is a model enum id (not a token count), #2
+ * is uncached input, #3 is total output (#9 reasoning plus #10 response text),
+ * #5 is cache read, #11 is response ID. Some responses appear only in
+ * steps.metadata: usage at #9, or at #28.#2 (without #1) on checkpoint steps.
+ * Reference: https://github.com/junhoyeo/tokscale/blob/main/crates/tokscale-core/src/sessions/antigravity_cli.rs
  */
 import path from "node:path";
 import { stat } from "node:fs/promises";
@@ -22,9 +23,10 @@ import {
 } from "./store.mjs";
 import { localDay } from "./util.mjs";
 
-const VERSION = 2;
+const VERSION = 3;
 const MAX_BLOB = 16 * 1024 * 1024;
 const MAX_FIELDS = 100_000;
+const CHECKPOINT_STEP = 23;
 
 export function antigravityConversation(file) {
   return file.endsWith(".db")
@@ -96,7 +98,21 @@ function provider(model) {
   return "unknown";
 }
 
-export function decodeAntigravityGeneration(bytes) {
+function decodeUsage(bytes) {
+  const usage = protobufFields(bytes);
+  const input = integer(usage, 2), output = integer(usage, 3), cacheRead = integer(usage, 5);
+  const reasoning = integer(usage, 9), responseText = integer(usage, 10);
+  if (!Number.isSafeInteger(input + output + cacheRead)) throw new Error("unsafe token total");
+  if (reasoning + responseText !== output) throw new Error("inconsistent output accounting");
+  return {
+    modelId: integer(usage, 1), responseId: responseId(usage),
+    // A record without measured tokens is not usage.
+    tokens: input + output + cacheRead === 0 ? null : { input, output, cacheRead, cacheWrite: 0, reasoning },
+  };
+}
+
+/** Collects the model id to model name pairs it sees into `models`. */
+export function decodeAntigravityGeneration(bytes, models) {
   const outer = protobufFields(bytes);
   const packedSteps = blob(outer, 2);
   let step = null;
@@ -111,19 +127,12 @@ export function decodeAntigravityGeneration(bytes) {
     const inner = protobufFields(field.value);
     const usageBytes = blob(inner, 4);
     if (!usageBytes) continue;
-    const usage = protobufFields(usageBytes);
+    const usage = decodeUsage(usageBytes);
     recognizedUsage = true;
-    const system = integer(usage, 1), input = integer(usage, 2);
-    const output = integer(usage, 3), cacheRead = integer(usage, 5);
-    const reasoning = integer(usage, 10), outputText = integer(usage, 9);
-    if (!Number.isSafeInteger(system + input + output + cacheRead)) throw new Error("unsafe token total");
-    if (outputText + reasoning !== output) throw new Error("inconsistent output accounting");
-    // A system-prompt estimate alone is not measured request usage.
-    if (input + output + cacheRead === 0) continue;
-    generations.push({
-      step, model: text(blob(inner, 19)) || "unknown", responseId: responseId(usage),
-      tokens: { input: system + input, output, cacheRead, cacheWrite: 0, reasoning },
-    });
+    const model = text(blob(inner, 19));
+    if (usage.modelId && model) models?.set(usage.modelId, model);
+    if (!usage.tokens) continue;
+    generations.push({ step, model: model || "unknown", responseId: usage.responseId, tokens: usage.tokens });
   }
   if (!recognizedUsage) throw new Error("unrecognized generation metadata");
   return generations;
@@ -147,6 +156,19 @@ function stepTimestamp(bytes, id) {
   // Trust a step timestamp only when it identifies the same response.
   if (!usage || responseId(protobufFields(usage)) !== id) return null;
   return timestamp(blob(fields, 1));
+}
+
+function decodeStep(bytes, stepType) {
+  const fields = protobufFields(bytes);
+  const direct = blob(fields, 9);
+  const summary = stepType === CHECKPOINT_STEP ? blob(fields, 28) : undefined;
+  const checkpoint = summary && blob(protobufFields(summary), 2);
+  if (!direct && !checkpoint) return null;
+  return {
+    created: timestamp(blob(fields, 1)),
+    direct: direct && decodeUsage(direct),
+    checkpoint: checkpoint && decodeUsage(checkpoint),
+  };
 }
 
 export async function scanAntigravityDb(store, source, file, sink, stats, options = {}) {
@@ -192,40 +214,60 @@ export async function scanAntigravityDb(store, source, file, sink, stats, option
     db = new sqlite.DatabaseSync(file, { readOnly: true });
     db.exec("BEGIN");
     // SQLite limits the returned blob before it crosses into JS memory.
-    const limited = `CASE WHEN length(data) <= ${MAX_BLOB} THEN data ELSE NULL END`;
+    const limited = (column) => `CASE WHEN length(${column}) <= ${MAX_BLOB} THEN ${column} ELSE NULL END`;
     let session = {};
-    const meta = db.prepare(`SELECT ${limited} AS data FROM trajectory_metadata_blob WHERE id = 'main'`).get();
+    const meta = db.prepare(`SELECT ${limited("data")} AS data FROM trajectory_metadata_blob WHERE id = 'main'`).get();
     if (meta?.data) {
       try { session = sessionMetadata(meta.data); } catch { counts.malformed += 1; }
     } else if (meta) counts.oversized += 1;
-    const stepQuery = db.prepare(`SELECT CASE WHEN length(metadata) <= ${MAX_BLOB} THEN metadata ELSE NULL END AS data FROM steps WHERE idx = ?`);
-    // Node 22.15 iterators do not retain their prepared statement across garbage collection.
-    const query = db.prepare(`SELECT idx, ${limited} AS data FROM gen_metadata ORDER BY idx`);
-    const records = Object.assign(query.iterate(), { statementOwner: query });
+    const stepQuery = db.prepare(`SELECT ${limited("metadata")} AS data FROM steps WHERE idx = ?`);
     if (!entry) entry = newFileEntry(store, {
       sourceId: source.id, adapter: source.adapter, path: file,
       dev: String(info.dev), ino: String(info.ino), size: 0, mtimeMs: 0, compressed: false,
     });
     else resetFileEntry(store, entry);
     const conversation = antigravityConversation(file);
-    for (const record of records) {
-      if (rows > 0 && rows % 128 === 0) {
-        options.onStreamProgress?.({ file, bytes, phase: "scan" });
-        // Let signal handlers and generation-fence polling run between batches.
-        await setImmediate();
+    const add = (created, model, tokens, dedupKey) => {
+      if (created === null) {
+        counts.approximateTime += 1;
+        created = session.timestamp ?? info.mtimeMs;
       }
-      const stopped = options.shouldStop?.();
-      const expired = rows > 0 && Number.isFinite(options.deadline) &&
-        (options.now ?? Date.now)() >= options.deadline;
-      if (stopped || expired) {
-        rollbackStoreTransaction(tx);
-        return { dirty: false, aborted: true, reason: stopped ? "stop" : "budget" };
+      addUsage(store, entry, {
+        day: localDay(created), session: `antigravity:${conversation}`, harness: "antigravity",
+        model, provider: provider(model), project: session.project ?? "unknown",
+      }, tokens, dedupKey);
+    };
+    // Resolves to the reason for an interruption, which the caller must roll back.
+    const eachRow = async (sql, handle) => {
+      // Node 22.15 iterators do not retain their prepared statement across garbage collection.
+      const query = db.prepare(sql);
+      const records = Object.assign(query.iterate(), { statementOwner: query });
+      for (const record of records) {
+        if (rows > 0 && rows % 128 === 0) {
+          options.onStreamProgress?.({ file, bytes, phase: "scan" });
+          // Let signal handlers and generation-fence polling run between batches.
+          await setImmediate();
+        }
+        const stopped = options.shouldStop?.();
+        const expired = rows > 0 && Number.isFinite(options.deadline) &&
+          (options.now ?? Date.now)() >= options.deadline;
+        if (stopped || expired) return stopped ? "stop" : "budget";
+        rows += 1;
+        bytes += record.data?.length ?? 0;
+        if (record.data) handle(record);
+        else counts.oversized += 1;
       }
-      rows += 1;
-      bytes += record.data?.length ?? 0;
-      if (!record.data) { counts.oversized += 1; continue; }
+      return null;
+    };
+    const interrupted = (reason) => {
+      rollbackStoreTransaction(tx);
+      return { dirty: false, aborted: true, reason };
+    };
+    const models = new Map();
+    const countedIds = new Set();
+    let reason = await eachRow(`SELECT idx, ${limited("data")} AS data FROM gen_metadata ORDER BY idx`, (record) => {
       let generations;
-      try { generations = decodeAntigravityGeneration(record.data); } catch { counts.malformed += 1; continue; }
+      try { generations = decodeAntigravityGeneration(record.data, models); } catch { counts.malformed += 1; return; }
       decodedRows += 1;
       for (let index = 0; index < generations.length; index += 1) {
         const generation = generations[index];
@@ -234,25 +276,38 @@ export async function scanAntigravityDb(store, source, file, sink, stats, option
           const step = stepQuery.get(generation.step);
           try { created = stepTimestamp(step?.data, generation.responseId); } catch { /* use documented fallback */ }
         }
-        if (created === null) {
-          counts.approximateTime += 1;
-          created = session.timestamp ?? info.mtimeMs;
-        }
-        if (!generation.responseId) counts.missingId += 1;
-        addUsage(store, entry, {
-          day: localDay(created), session: `antigravity:${conversation}`, harness: "antigravity",
-          model: generation.model, provider: provider(generation.model), project: session.project ?? "unknown",
-        }, generation.tokens, generation.responseId
+        if (generation.responseId) countedIds.add(generation.responseId);
+        else counts.missingId += 1;
+        add(created, generation.model, generation.tokens, generation.responseId
           ? makeDedupKey("antigravity", "response", generation.responseId)
           : makeDedupKey("antigravity", "generation", conversation, record.idx, index));
       }
-    }
+    });
+    if (reason) return interrupted(reason);
     // An undecodable snapshot is not evidence that previously measured usage vanished.
     if (rows > 0 && decodedRows === 0) {
       rollbackStoreTransaction(tx);
       sink.warn(`Antigravity ${path.basename(file)}: no decodable generation records; previous accepted data retained.`);
       return { dirty: false, aborted: false };
     }
+    const addStepUsage = (usage, created) => {
+      // Without a response ID, step usage cannot be told apart from a generation record.
+      if (!usage?.tokens || !usage.responseId || countedIds.has(usage.responseId)) return;
+      countedIds.add(usage.responseId);
+      add(created, models.get(usage.modelId) ?? "unknown", usage.tokens,
+        makeDedupKey("antigravity", "response", usage.responseId));
+    };
+    // Checkpoint copies wait for every #9 usage, which alone carries the model id.
+    const checkpoints = [];
+    reason = await eachRow(`SELECT step_type, ${limited("metadata")} AS data FROM steps WHERE metadata IS NOT NULL ORDER BY idx`, (record) => {
+      let step;
+      try { step = decodeStep(record.data, record.step_type); } catch { counts.malformed += 1; return; }
+      if (!step) return;
+      addStepUsage(step.direct, step.created);
+      if (step.checkpoint) checkpoints.push(step);
+    });
+    if (reason) return interrupted(reason);
+    for (const step of checkpoints) addStepUsage(step.checkpoint, step.created);
     db.exec("COMMIT");
     const warnings = [];
     const notes = [];
