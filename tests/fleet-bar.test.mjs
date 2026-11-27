@@ -21,7 +21,7 @@ const { FLEET_PREFS_KEY, fleetAdapter, sharedFleetPrefs } = await import(`${root
 const { LOCAL_COLLAPSE_KEY } = await import(`${root}/fleet/model.js`);
 const { VERSION } = await import(`${root}/fleet-quota/protocol.mjs`);
 const { effectivePrefs } = await import(`${root}/lib/prefs.js`);
-const { DENSITY, barModel, groupWidth, segmentView } = await import(`${root}/lib/view.js`);
+const { DENSITY, barModel: buildBarModel, groupWidth, segmentView } = await import(`${root}/lib/view.js`);
 const { fleetBar } = await import(`${root}/fleet/model.js`);
 const { PROVIDERS } = await import(`${root}/providers/index.js`);
 const { limitsPanel } = await import(`${root}/ui/panel.js`);
@@ -140,7 +140,7 @@ test("each known provider has a Herdr App icon, tinted only when it is one color
 
 test("an unknown provider gets a boxed monogram of its initials", () => {
   for (const [id, name, text] of [["made-up", "Made Up", "MU"], ["made-up", undefined, "MU"],
-    ["gemini", "Gemini", "G"], ["a_b_c", "", "AB"]]) {
+    ["gemini", "Gemini", "G"], ["a_b_c", "", "AB"], ["constructor", undefined, "C"]]) {
     const node = stub.nodeOf(providerIcon(id, name, "#fff"));
     assert.equal(stub.textOf(node), text, id);
     assert.deepEqual(stub.assets(node), [], id);
@@ -278,6 +278,48 @@ test("This Computer collapses too and still lists its compact quotas", () => {
   assert.ok(stub.findById(tree, "ul-remote-refresh-arch-copilot"), "remote machines are unaffected");
 });
 
+test("every collapsed summary labels its window, however long the row", () => {
+  const remote = linuxHost();
+  remote.providers[3] = item("agy", { current: current("host", NOW - MIN, goWindows.slice(0, 2)) });
+  const { adapter, model } = harness(project(remote));
+  adapter.dispatch({ type: "collapse", key: "arch" });
+  const tree = drawPanel(model());
+  for (const [id, short] of [["claude", "wk"], ["codex", "5h"], ["copilot", "mo"], ["agy", "wk"]]) {
+    const frame = stub.findById(tree, `ul-sum-arch-${id}`);
+    assert.ok(stub.findAll(frame, (n) => n.texts.includes(short)).length, `${id} ${short}`);
+  }
+});
+
+test("a one-machine bar keeps its numbers down to the width its estimate needs", () => {
+  const states = { ...localStates, codex: { installed: false } };
+  const models = harness(project(linuxHost())).adapter.model(project(linuxHost()), null, effectivePrefs(), { local: states, now: NOW });
+  assert.deepEqual(models.groups.map((h) => [h.chip, h.groups.map((g) => g.providerId)]), [["This Computer", ["claude"]]]);
+  // Chip 106, frame 36, label 21 and number 22, beside the bar's padding and details button (52).
+  const width = 106 + 36 + 21 + 22 + 52;
+  const fleet = fleetBar(models, width, [], true);
+  assert.equal(fleet.labels, undefined);
+  assert.match(barText(fleet), /5h 4%/);
+  assert.deepEqual(fleetBar(models, width - 1, [], true).labels, ["This Computer"]);
+});
+
+test("eight providers on two machines still show numbers at 1152px", () => {
+  const spend = (today) => ({ report: { status: "ok", observedAt: NOW, windows: [], spend: { today, week: 2 * today } } });
+  const limits = (...windows) => ({ report: { status: "ok", observedAt: NOW, windows } });
+  const local = { claude: limits(win("weekly_all", "wk", "Weekly", 82, NOW + 3 * DAY, 604800)),
+    codex: limits(win("codex:primary", "5h", "5-hour", 20, NOW + 3600, 18000)), opencode: spend(1_200_000), pi: spend(48_000) };
+  const remote = linuxHost({ label: "t87" });
+  remote.providers[3] = item("agy", { current: current("host", NOW - MIN, goWindows.slice(0, 1)) });
+  const projection = project(remote);
+  const prefs = effectivePrefs({ spendOnBar: { opencode: true, pi: true } });
+  const { adapter } = harness(projection, { mode: "combined", selected: { route: "arch", label: "t87" }, collapsed: [] });
+  const models = adapter.model(projection, null, prefs, { local, now: NOW }, chipsFor("mbp", "Linux"));
+  assert.deepEqual(models.groups.map((h) => [h.chip, h.groups.length]), [["Mac · mbp", 4], ["Linux · t87", 4]]);
+  const fleet = fleetBar(models, 1152, [], true);
+  assert.equal(fleet.labels, undefined);
+  const text = barText(fleet);
+  for (const number of ["82% · 3d 0h", "20%", "1.2M", "48k", "100% · 10d 0h", "4%"]) assert.ok(text.includes(number), number);
+});
+
 test("the refresh outcome names the provider", () => {
   const remoteOutcome = { status: "accepted", route: "arch", label: "mateod-arch", provider: "agy" };
   const text = stub.textOf(drawPanel(harness(project(linuxHost())).model(), { remoteOutcome }));
@@ -301,7 +343,7 @@ const drawBar = (fields) => stub.nodeOf(statusBar({ detailsOpen: null, panel: nu
 const framesOf = (tree, prefix) => stub.findAll(tree, (n) => typeof n.id === "string" && n.id.startsWith(prefix));
 const localStates = { claude: { report: { status: "ok", observedAt: NOW, windows: [
   win("session", "5h", "5-hour", 4, NOW + 3600, 18000)] } } };
-const localBar = (density, fields = {}) => drawBar({ model: barModel(localStates, effectivePrefs(), NOW), numbers: [], density, ...fields });
+const localBar = (density, fields = {}) => drawBar({ model: buildBarModel(localStates, effectivePrefs(), NOW), numbers: [], density, ...fields });
 
 function assertFramed(frame) {
   for (const [method, value] of [["h", 20], ["px", 6], ["rounded", 5], ["border", 1], ["border_color", "border"], ["bg", "raised"]]) {
@@ -354,7 +396,7 @@ test("the provider name shows on hover in the fleet bar and summaries, never in 
 test("only frames separate local providers, and a divider separates machines", () => {
   const dividers = (tree) => stub.findAll(tree, (n) => called(n, "w")?.[0] === 1 && called(n, "h")?.[0] === 14).length;
   const states = { ...localStates, codex: localStates.claude };
-  const model = barModel(states, effectivePrefs(), NOW);
+  const model = buildBarModel(states, effectivePrefs(), NOW);
   assert.equal(dividers(drawBar({ model, numbers: [], density: DENSITY.FULL })), 0);
   assert.equal(dividers(drawBar({ model, numbers: [{ level: "ok", text: "12%" }], density: DENSITY.FULL })), 1);
   assert.equal(dividers(drawBar({ fleet: fleetBar(harness(project(linuxHost())).model(), 1400, [], true) })), 0);
@@ -383,7 +425,7 @@ test("window labels and 'today' are muted, and the narrowest local densities dro
   assert.ok(mutedTexts(localBar(DENSITY.NO_BARS)).includes("5h"));
   assert.ok(!stub.textOf(localBar(DENSITY.NO_LABELS)).includes("5h"));
   const states = { pi: { report: { status: "ok", observedAt: NOW, windows: [], spend: { today: 1200, week: 5000 } } } };
-  const model = barModel(states, effectivePrefs({ spendOnBar: { pi: true } }), NOW);
+  const model = buildBarModel(states, effectivePrefs({ spendOnBar: { pi: true } }), NOW);
   assert.ok(mutedTexts(drawBar({ model, numbers: [], density: DENSITY.FULL })).includes("today"));
 });
 

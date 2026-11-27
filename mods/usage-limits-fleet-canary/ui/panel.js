@@ -7,7 +7,7 @@ import { inPanel } from "../lib/prefs.js";
 import { canRefreshRemote } from "../fleet/adapter.js";
 import { LOCAL_COLLAPSE_KEY, hostChip } from "../fleet/model.js";
 import { ago, timeLeft } from "../lib/format.js";
-import { chooseDensity } from "../lib/view.js";
+import { DENSITY } from "../lib/view.js";
 import { providerName } from "../providers/index.js";
 
 const PANEL_W = 340;
@@ -108,9 +108,9 @@ function hostToggle(key, collapsed, label, title, panel) {
 }
 
 function hostSummary(host, key, panel) {
-  const density = chooseDensity({ groups: host.summary }, PANEL_W - 24, false);
+  // The row wraps, so each number keeps the label naming its window.
   return h_flex().gap(10).items_center().flex_wrap().pl(16)
-    .children(host.summary.map((g) => providerGroup(g, density, panel.t, `ul-sum-${key}`, panel.prefs.nameOnHover)));
+    .children(host.summary.map((g) => providerGroup(g, DENSITY.NO_BARS, panel.t, `ul-sum-${key}`, panel.prefs.nameOnHover)));
 }
 
 function remoteDetails(remote, panel, selection) {

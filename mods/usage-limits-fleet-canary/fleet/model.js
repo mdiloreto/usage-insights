@@ -105,10 +105,9 @@ export function fleetModels(projection, prefs, selection, localSource, identity 
 
 const labelWidth = (label) => Math.ceil(7.5 * label.length + 8);
 export const hostChip = (host) => host.chip ?? host.label;
-const CHIP_FRAME = 12;
-// The space after a machine: the 1px divider and the gap on each side of it.
+// Between two machines: the 1px divider and the gap on each side of it.
 const HOST_GAP_W = 17;
-const hostWidth = (host, density) => labelWidth(hostChip(host)) + CHIP_FRAME + host.groups.reduce((sum, g) =>
+const hostWidth = (host, density) => labelWidth(hostChip(host)) + host.groups.reduce((sum, g) =>
   sum + groupWidth(g, density) + (g.mark == null ? 0 : 16), 0);
 
 export function fleetBar(models, width, numbers, showBars) {
@@ -116,7 +115,7 @@ export function fleetBar(models, width, numbers, showBars) {
   if (!groups.includes(models.local)) numbers = [];
   const sessionWidth = sessionNumbersWidth(numbers);
   const room = width - 24 - sessionWidth - 28;
-  const fits = (hosts, density) => hosts.reduce((sum, host) => sum + hostWidth(host, density) + HOST_GAP_W, 0) <= room;
+  const fits = (hosts, density) => hosts.reduce((sum, host) => sum + hostWidth(host, density), HOST_GAP_W * (hosts.length - 1)) <= room;
   if (showBars && fits(groups, DENSITY.FULL)) return { groups, density: DENSITY.FULL, numbers };
   if (fits(groups, DENSITY.NO_BARS)) return { groups, density: DENSITY.NO_BARS, numbers };
   const tight = groups.map((host) => ({ ...host, groups: host.groups.map(tightGroup) }));

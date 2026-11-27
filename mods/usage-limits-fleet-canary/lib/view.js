@@ -201,12 +201,14 @@ const CHAR_W = 7;
 const LABEL_CHAR_W = 6.5;
 const SEGMENT_BAR_W = 30;
 const GAP_W = 12;
+const BARLESS_GAP_W = 8;
 const LABEL_GAP_W = 8;
 
 const spendWidth = (g) => LABEL_GAP_W + LABEL_CHAR_W * "today".length + CHAR_W * g.spend.length + GAP_W;
 
 function segmentWidth(s, density) {
-  const text = CHAR_W * (density === DENSITY.BRIEF ? s.brief : s.text).length + GAP_W;
+  const gap = density === DENSITY.FULL ? GAP_W : BARLESS_GAP_W;
+  const text = CHAR_W * (density === DENSITY.BRIEF ? s.brief : s.text).length + gap;
   if (density >= DENSITY.NO_LABELS) return text;
   const label = LABEL_GAP_W + LABEL_CHAR_W * s.short.length;
   return density === DENSITY.NO_BARS ? label + text : label + SEGMENT_BAR_W + text;

@@ -19,7 +19,7 @@ function monogram(text, color) {
 }
 
 export function providerIcon(id, name, color) {
-  const icon = PROVIDER_ICONS[id];
+  const icon = Object.hasOwn(PROVIDER_ICONS, id) ? PROVIDER_ICONS[id] : null;
   if (!icon) return monogram(initials(name || id), color);
   const glyph = icon.oneColor ? svg(icon.path).size(ICON_SIZE).text_color(color) : image(icon.path).size(ICON_SIZE);
   if (!icon.tag) return glyph;

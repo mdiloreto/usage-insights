@@ -88,9 +88,10 @@ SOFTWARE.
 ## Provider icons
 
 The bar draws icons built into Herdr App (checked in herdr-app 0.1.16) and redistributes
-none of them. Herdr App's own notice says its agent icons come from
-[LobeHub icons](https://github.com/lobehub/lobe-icons) (MIT) "and the agents' own marks",
-and that those licenses grant no trademark rights.
+none of them. The icon notes embedded in the herdr-app 0.1.16 binary
+(`defaults/icons/LICENSES.md`, not its `THIRD-PARTY-NOTICES` file) say the agent icons come
+from [LobeHub icons](https://github.com/lobehub/lobe-icons) (MIT) "and the agents' own
+marks", and that those licenses grant no trademark rights.
 
 | Provider | Herdr App asset | Owner of the mark |
 | --- | --- | --- |
@@ -100,7 +101,7 @@ and that those licenses grant no trademark rights.
 | agy | `icons/antigravity.svg` | Google |
 | opencode | `icons/opencode.svg` | the OpenCode project |
 | opencode-go | `icons/opencode.svg` | the OpenCode project |
-| pi | `icons/pi.svg` | the pi project (the project's own mark rather than LobeHub markup) |
+| pi | `icons/pi.svg` | the pi project (its markup differs from the LobeHub icons; its origin is not stated per icon) |
 
 The marks only identify whose quota is shown; no affiliation is implied. Unknown providers
 get a text monogram.
