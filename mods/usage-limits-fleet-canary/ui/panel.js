@@ -110,7 +110,7 @@ function hostToggle(key, collapsed, label, title, panel) {
 function hostSummary(host, key, panel) {
   const density = chooseDensity({ groups: host.summary }, PANEL_W - 24, false);
   return h_flex().gap(10).items_center().flex_wrap().pl(16)
-    .children(host.summary.map((g) => providerGroup(g, density, panel.t, `ul-sum-${key}`, false)));
+    .children(host.summary.map((g) => providerGroup(g, density, panel.t, `ul-sum-${key}`, panel.prefs.nameOnHover)));
 }
 
 function remoteDetails(remote, panel, selection) {

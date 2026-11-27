@@ -43,7 +43,7 @@ function header(g, arrows, panel, scope) {
     .when(!scope, (e) => e.cursor_pointer()
       .on_hover((on, cx) => act.hoverHeader(id, on, cx))
       .on_click((_e, cx) => act.fold(id, cx)))
-    .child(providerIcon(id, g.icon, t.foreground))
+    .child(providerIcon(id, g.name, t.foreground))
     .child(div().flex_none().font_semibold().child(g.name))
     .when(g.plan != null, (e) => e.child(div().flex_none().px(5).rounded(4).bg(t.raised).text_size(10).text_color(t.accent).child(g.plan)))
     .when(!scope && (g.folded || arrows || panel.hovered === id), (e) => e.child(svg(modIcon(arrow)).size(12).text_color(t.dim)));
@@ -80,7 +80,7 @@ export function limitsGroup(g, arrows, panel, scope = null) {
 export function spendLine(g, t) {
   const opacity = g.failed ? DIMMED : 1;
   return h_flex().gap(6).items_center().opacity(g.dim && !g.failed ? DIMMED : 1)
-    .child(providerIcon(g.providerId, g.icon, t.foreground))
+    .child(providerIcon(g.providerId, g.name, t.foreground))
     .child(div().flex_none().font_semibold().child(g.name))
     .child(g.failed ? failure(g.status, t) : rightLabel("Tokens today / 7d", t))
     .child(h_flex().gap(8).items_center().flex_none()

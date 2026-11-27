@@ -225,7 +225,7 @@ export default class UsageLimits extends View {
         else if (this.detailsOpen === "all" || Number(this.detailsOpen) >= fleet.labels.length) this.detailsOpen = "0";
       }
       return statusBar({
-        ...common, fleet, detailsOpen: this.detailsOpen,
+        ...common, fleet, nameOnHover: prefs.nameOnHover, detailsOpen: this.detailsOpen,
         panel: this.detailsOpen == null ? null : this.drawPanel(t, prefs, combined, st, now),
         toggleDetails: (id, open, clickCx) => {
           if (open) {

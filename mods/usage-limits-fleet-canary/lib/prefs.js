@@ -3,6 +3,7 @@ const normalize = (p) => ({
   hiddenWindows: [...(p?.hiddenWindows ?? [])],
   showResetTime: p?.showResetTime === true,
   showBars: p?.showBars !== false,
+  nameOnHover: p?.nameOnHover !== false,
   sessionOnBar: [...(p?.sessionOnBar ?? [])],
   panelHidden: [...(p?.panelHidden ?? [])],
   folded: [...(p?.folded ?? [])],
@@ -34,6 +35,10 @@ export function toggleShowResetTime(prefs) {
 
 export function toggleShowBars(prefs) {
   return { ...normalize(prefs), showBars: !prefs.showBars };
+}
+
+export function toggleNameOnHover(prefs) {
+  return { ...normalize(prefs), nameOnHover: !prefs.nameOnHover };
 }
 
 export const isOnBar = (prefs, row) => prefs.sessionOnBar.includes(row);

@@ -1,6 +1,7 @@
 import { timeLeft, level, pace, ago, tokens } from "./format.js";
 import { isShown, inPanel, isFolded, spendOnBar, effectivePrefs } from "./prefs.js";
 import { PROVIDERS } from "../providers/index.js";
+import { PROVIDER_ICONS } from "../ui/icons.js";
 
 const STALE_AFTER_S = 15 * 60;
 export const NO_READING = "—";
@@ -104,7 +105,7 @@ function spendGroup(p, st, now) {
   const source = shownReading(st);
   if (source && !usedThisWeek(source)) return null;
   return {
-    providerId: p.id, name: p.name, icon: p.icon, kind: "spend", plan: null, rows: [], folded: false, summary: null,
+    providerId: p.id, name: p.name, kind: "spend", plan: null, rows: [], folded: false, summary: null,
     ...readingStatus(report, lastGood, now),
     today: source ? tokens(source.spend.today) : null,
     week: source ? tokens(source.spend.week) : null,
@@ -118,7 +119,7 @@ function limitsGroup(p, st, now, prefs) {
   const windows = (report?.status === "ok" ? report.windows : lastGood?.windows) ?? [];
   const closest = tightest(windows, now);
   return {
-    providerId: p.id, name: p.name, icon: p.icon,
+    providerId: p.id, name: p.name,
     plan: report?.status === "ok" && report.plan ? capitalized(report.plan) : null,
     ...(report ? readingStatus(report, lastGood, now) : LOADING),
     rows: report ? windows.map((w) => cardRow(w, now)) : [],
@@ -156,7 +157,7 @@ function spendBarGroup(p, st, now, spendShown) {
   if (!st?.report || st.installed === false || !usedThisWeek(source) || !spendShown()) return null;
   const failing = st.report.status !== "ok";
   return {
-    providerId: p.id, name: p.name, icon: p.icon,
+    providerId: p.id, name: p.name,
     mark: failing ? FAILED_MARK : null,
     dim: failing || isStale(source, now),
     segments: [],
@@ -177,7 +178,7 @@ function limitsBarGroup(p, st, now, prefs) {
     .filter((w) => isShown(prefs, p.id, w.id))
     .map((w) => segmentView(w, now, prefs.showResetTime));
   const dim = mark === FAILED_MARK || (source != null && isStale(source, now));
-  return { providerId: p.id, name: p.name, icon: p.icon, mark, dim, segments };
+  return { providerId: p.id, name: p.name, mark, dim, segments };
 }
 
 export function barModel(states, prefs, now, providers = PROVIDERS) {
@@ -192,7 +193,10 @@ export function barModel(states, prefs, now, providers = PROVIDERS) {
   return { groups, empty: groups.length === 0 };
 }
 
-const GROUP_W = 20;
+// A provider frame: its icon (14), padding and border (14) and the space to the next one (8).
+const GROUP_W = 36;
+// The text tag beside a shared glyph.
+const ICON_TAG_W = 11;
 const CHAR_W = 7;
 const LABEL_CHAR_W = 6.5;
 const SEGMENT_BAR_W = 30;
@@ -208,7 +212,8 @@ function segmentWidth(s, density) {
   return density === DENSITY.NO_BARS ? label + text : label + SEGMENT_BAR_W + text;
 }
 
-export const groupWidth = (g, density) => GROUP_W + (g.spend != null ? spendWidth(g) : 0) + g.segments.reduce((a, s) => a + segmentWidth(s, density), 0);
+export const groupWidth = (g, density) => GROUP_W + (PROVIDER_ICONS[g.providerId]?.tag ? ICON_TAG_W : 0)
+  + (g.spend != null ? spendWidth(g) : 0) + g.segments.reduce((a, s) => a + segmentWidth(s, density), 0);
 
 export function chooseDensity(model, widthPx, showBars = true) {
   const steps = showBars ? [DENSITY.FULL, DENSITY.NO_BARS, DENSITY.NO_LABELS, DENSITY.BRIEF] : [DENSITY.NO_BARS, DENSITY.NO_LABELS, DENSITY.BRIEF];

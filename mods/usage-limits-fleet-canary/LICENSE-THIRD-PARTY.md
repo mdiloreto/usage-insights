@@ -84,3 +84,23 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Provider icons
+
+The bar draws icons built into Herdr App (checked in herdr-app 0.1.16) and redistributes
+none of them. Herdr App's own notice says its agent icons come from
+[LobeHub icons](https://github.com/lobehub/lobe-icons) (MIT) "and the agents' own marks",
+and that those licenses grant no trademark rights.
+
+| Provider | Herdr App asset | Owner of the mark |
+| --- | --- | --- |
+| claude | `icons/claude.svg` | Anthropic |
+| codex | `icons/codex.svg` | OpenAI |
+| copilot | `icons/copilot.svg` | GitHub |
+| agy | `icons/antigravity.svg` | Google |
+| opencode | `icons/opencode.svg` | the OpenCode project |
+| opencode-go | `icons/opencode.svg` | the OpenCode project |
+| pi | `icons/pi.svg` | the pi project (the project's own mark rather than LobeHub markup) |
+
+The marks only identify whose quota is shown; no affiliation is implied. Unknown providers
+get a text monogram.
