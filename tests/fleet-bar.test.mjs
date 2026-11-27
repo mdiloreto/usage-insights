@@ -244,9 +244,8 @@ test("the bar drops provider names, keeping icons and segments, before it falls 
 
 const { createIdentity, cleanName, osFromUname } = await import(`${root}/fleet/identity.js`);
 
-const barTree = (fleet) => stub.nodeOf(statusBar({ fleet, detailsOpen: null, panel: null, border: false,
-  onResize() {}, onHover() {}, toggleDetails() {} }, stub.theme));
-const barText = (fleet) => stub.textOf(barTree(fleet));
+const barText = (fleet) => stub.textOf(stub.nodeOf(statusBar({ fleet, detailsOpen: null, panel: null, border: false,
+  onResize() {}, onHover() {}, toggleDetails() {} }, stub.theme)));
 const chipsFor = (local, remote) => ({ localOs: "Mac", localName: local, remoteOs: () => remote });
 const combinedModel = (identity) => {
   const projection = project(linuxHost());
@@ -632,6 +631,8 @@ function barFleet(remotes, { local = {}, focused = null, mode = "follow", select
 const onBar = (models) => models.groups.map((h) => [h.chip ?? h.label, h.groups.map((g) => g.providerId)]);
 const lent = (models) => models.groups.at(-1);
 const MAC = "Mac · laptop";
+const barTree = (fleet) => stub.nodeOf(statusBar({ fleet, detailsOpen: null, panel: null, border: false,
+  onResize() {}, onHover() {}, toggleDetails() {} }, stub.theme));
 const agyFrames = (fleet) => stub.findAll(barTree(fleet), (n) => /^ul-fleet-provider-\d+-agy$/.test(n.id));
 
 test("Follow Space in a local space lends a remote machine's current Antigravity reading", () => {
