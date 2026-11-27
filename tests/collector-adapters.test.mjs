@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { dedupKeyFor, loadStore, saveStore } from "../mods/insights/core/store.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const collector = path.join(here, "..", "mods", "insights", "collector.mjs");
@@ -529,6 +530,136 @@ test("Codex fork records keep their own thread identity", async () => {
   assert.equal(row.activeMs, 2000);
   assert.equal(row.longestTaskMs, 2000);
   assert.equal(snapshot.stats.errors, 0);
+});
+
+// The fork and counter fixtures and their expected totals come from
+// GaganSD/coding-agent-toolkit#131 and #165 (MIT, © Gagan Devagiri).
+async function codexRows(fixture) {
+  const context = await env();
+  await placeFixture(context, `.codex/sessions/2026/03/08/${fixture}`, fixture);
+  const snapshot = await configure(context, [
+    { id: "codex", label: "Codex", adapter: "codex", enabled: true, roots: ["~/.codex/sessions"] },
+  ]);
+  assert.equal(snapshot.stats.errors, 0);
+  return snapshot.rows;
+}
+
+function totalTokens(rows) {
+  return rows.reduce((sum, row) => sum + row.tokens.total, 0);
+}
+
+for (const fixture of ["codex-fork-replay-context.jsonl", "codex-fork-replay-bare.jsonl", "codex-fork-replay-v4-turn.jsonl"]) {
+  test(`Codex fork counts only the child's own usage, not the copied parent history (${fixture})`, async () => {
+    const rows = await codexRows(fixture);
+    assert.deepEqual(rows.map((row) => row.model), ["child-model"], "no unknown or parent-model rows");
+    assert.equal(rows[0].session, "codex:019f0000-1000-7000-8000-000000000001");
+    assert.equal(totalTokens(rows), 250, "2750 child total minus the 2500 parent baseline");
+  });
+}
+
+test("Codex non-fork session still counts its first cumulative total in full", async () => {
+  const rows = await codexRows("codex-nonfork-prefix.jsonl");
+  assert.equal(totalTokens(rows), 2750);
+  assert.ok(rows.some((row) => row.model === "unknown"), "records before any turn_context are still counted");
+});
+
+test("Codex interleaved cumulative counters count each response once, not a reset", async () => {
+  // 110 + 130 + 121 + 140: a lower branch total is one response, and its later
+  // re-emission is a duplicate.
+  assert.equal(totalTokens(await codexRows("codex-concurrent-counters.jsonl")), 501);
+});
+
+// A rollout moved or compressed before a parser upgrade leaves its old rows in
+// the store; the re-read copy must land on the same keys, not beside them.
+test("Codex per-response counts keep the identity stored history already uses", async () => {
+  const context = await env();
+  await placeFixture(context, ".codex/sessions/rollout.jsonl", "codex-concurrent-counters.jsonl");
+  await configure(context, [
+    { id: "codex", label: "Codex", adapter: "codex", enabled: true, roots: ["~/.codex/sessions"] },
+  ]);
+  const { store } = await loadStore(context.store);
+  const stored = dedupKeyFor("codex", "codex:codex-concurrent", "legacy", "2026-03-09T09:00:02.000Z", 100, 0, 0, 10, 0);
+  assert.ok(Object.hasOwn(store.dedup, stored));
+});
+
+test("Codex responses with their own ids count again when the counters repeat after a restart", async () => {
+  const context = await env();
+  const target = path.join(context.home, ".codex/sessions/rollout.jsonl");
+  await mkdir(path.dirname(target), { recursive: true });
+  const usage = (input) => ({ input_tokens: input, output_tokens: 0 });
+  const counts = [["a", 20, 20], ["b", 30, 10], ["c", 20, 20], ["d", 30, 10]].map(([id, total, last], index) => ({
+    type: "event_msg",
+    timestamp: `2026-03-12T10:00:0${index}.000Z`,
+    payload: { type: "token_count", response_id: id, info: { total_token_usage: usage(total), last_token_usage: usage(last) } },
+  }));
+  await writeFile(target, counts.map((record) => `${JSON.stringify(record)}\n`).join(""));
+  const snapshot = await configure(context, [
+    { id: "codex", label: "Codex", adapter: "codex", enabled: true, roots: ["~/.codex/sessions"] },
+  ]);
+  assert.equal(totalTokens(snapshot.rows), 60);
+});
+
+// Version 5 is the last parser that counted a fork's inherited total. An
+// unchanged rollout it stored must still be read again, or the overcount stays.
+test("Codex history stored by parser version 5 is read again", async () => {
+  const context = await env();
+  await placeFixture(context, ".codex/sessions/rollout.jsonl", "codex-fork-inherited-total.jsonl");
+  await configure(context, [
+    { id: "codex", label: "Codex", adapter: "codex", enabled: true, roots: ["~/.codex/sessions"] },
+  ]);
+  const { store } = await loadStore(context.store);
+  const [entry] = Object.values(store.files);
+  entry.state.codexParserVersion = 5;
+  entry.rows[0].input += 5500;
+  await saveStore(context.store, store);
+  const result = await run(["snapshot", "--store", context.store, "--home", context.home]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(totalTokens(JSON.parse(result.stdout).rows), 250);
+});
+
+test("Codex paginated fork counts its own responses, not the inherited parent total", async () => {
+  const rows = await codexRows("codex-fork-inherited-total.jsonl");
+  assert.deepEqual(rows.map((row) => row.model), ["child-model"]);
+  assert.equal(totalTokens(rows), 250, "100 + 150, without the parent's 5500");
+});
+
+// With token_usage_record present, a token_count is only an echo. Counting it by
+// last_token_usage would count the response twice whenever the echo is not
+// paired with its record.
+test("Codex echo arriving long after its token_usage_record is not counted again", async () => {
+  assert.equal(totalTokens(await codexRows("codex-late-echo.jsonl")), 110);
+});
+
+test("Codex echoes whose running total fell behind the records are not counted again", async () => {
+  assert.equal(totalTokens(await codexRows("codex-offset-counter.jsonl")), 660);
+});
+
+test("Codex fork does not count a repeat of the parent's last total after the boundary", async () => {
+  assert.equal(totalTokens(await codexRows("codex-fork-repeated-total.jsonl")), 100);
+});
+
+// Counts read before the first record stay per response, so a line counts the
+// same in an appended scan and in a copy: 100 and 50 by last_token_usage, then
+// the record's 40.
+test("Codex counts before the first token_usage_record are per response, also when appended or copied", async () => {
+  const context = await env();
+  const target = path.join(context.home, ".codex/sessions/rollout.jsonl");
+  await mkdir(path.dirname(target), { recursive: true });
+  const lines = (await readFile(path.join(fixtures, "codex-records-part-way.jsonl"), "utf8")).trimEnd().split("\n");
+  await writeFile(target, `${lines.slice(0, 4).join("\n")}\n`);
+  const before = await configure(context, [
+    { id: "codex", label: "Codex", adapter: "codex", enabled: true, roots: ["~/.codex/sessions"] },
+  ]);
+  assert.equal(totalTokens(before.rows), 150);
+  const rescan = async () => {
+    const result = await run(["snapshot", "--store", context.store, "--home", context.home]);
+    assert.equal(result.code, 0, result.stderr);
+    return totalTokens(JSON.parse(result.stdout).rows);
+  };
+  await appendFile(target, `${lines.slice(4).join("\n")}\n`);
+  assert.equal(await rescan(), 190);
+  await copyFile(target, path.join(path.dirname(target), "rollout-copy.jsonl"));
+  assert.equal(await rescan(), 190);
 });
 
 test("Custom declarative mapping: role filter, max revisions, harness/provider/model, duration", async () => {
