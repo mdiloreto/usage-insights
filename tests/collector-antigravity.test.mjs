@@ -366,7 +366,8 @@ test("Antigravity skips unusable step usage and dates a step without a timestamp
 
 test("Antigravity counts once a step whose generation record has no response ID", async (t) => {
   const context = await env(t);
-  const { db } = database(context, "conv", [{ idx: 0, data: generation({ id: "" }).data, usage: generation().usage }]);
+  const { db } = database(context, "conv", [{ idx: 0, data: generation({ id: "" }).data }]);
+  addStep(db, 1, { type: 23, usage: generation().usage, summary: generation().usage });
   db.close();
   const first = await run(context, true);
   assert.deepEqual(first.rows.map((r) => [r.messages, r.tokens.total]), [[1, 37]]);

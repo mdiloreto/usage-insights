@@ -270,6 +270,12 @@ export async function scanAntigravityDb(store, source, file, sink, stats, option
       rollbackStoreTransaction(tx);
       return { dirty: false, aborted: true, reason };
     };
+    const retain = (detail) => {
+      rollbackStoreTransaction(tx);
+      sink.warn(`Antigravity ${path.basename(file)}: ${detail}; previous accepted data retained.`);
+      return { dirty: false, aborted: false };
+    };
+    const responseKey = (id) => makeDedupKey("antigravity", "response", id);
     const models = new Map();
     const countedIds = new Set();
     // A generation record without a response ID still counts its step's response.
@@ -291,23 +297,18 @@ export async function scanAntigravityDb(store, source, file, sink, stats, option
           countedSteps.add(generation.step);
         }
         add(created, generation.model, generation.tokens, generation.responseId
-          ? makeDedupKey("antigravity", "response", generation.responseId)
+          ? responseKey(generation.responseId)
           : makeDedupKey("antigravity", "generation", conversation, record.idx, index));
       }
     });
     if (reason) return interrupted(reason);
     // An undecodable snapshot is not evidence that previously measured usage vanished.
-    if (rows > 0 && decodedRows === 0) {
-      rollbackStoreTransaction(tx);
-      sink.warn(`Antigravity ${path.basename(file)}: no decodable generation records; previous accepted data retained.`);
-      return { dirty: false, aborted: false };
-    }
+    if (rows > 0 && decodedRows === 0) return retain("no decodable generation records");
     const addStepUsage = (usage, created) => {
       // Without a response ID, step usage cannot be told apart from a generation record.
       if (!usage?.tokens || !usage.responseId || countedIds.has(usage.responseId)) return;
       countedIds.add(usage.responseId);
-      add(created, models.get(usage.modelId) ?? "unknown", usage.tokens,
-        makeDedupKey("antigravity", "response", usage.responseId));
+      add(created, models.get(usage.modelId) ?? "unknown", usage.tokens, responseKey(usage.responseId));
     };
     // Checkpoint copies wait for every #9 usage, which alone carries the model id.
     const checkpoints = [];
@@ -316,16 +317,14 @@ export async function scanAntigravityDb(store, source, file, sink, stats, option
       const malformed = () => { counts.malformed += 1; };
       try { step = decodeStep(record.data, record.step_type, malformed); } catch { malformed(); return; }
       if (!step) return;
-      if (!countedSteps.has(record.idx)) addStepUsage(step.direct, step.created);
+      // Marking the ID also covers a checkpoint copy of that response.
+      if (countedSteps.has(record.idx)) countedIds.add(step.direct?.responseId);
+      addStepUsage(step.direct, step.created);
       if (step.checkpoint) checkpoints.push(step);
     });
     if (reason) return interrupted(reason);
     for (const step of checkpoints) addStepUsage(step.checkpoint, step.created);
-    if (usages === 0 && (counts.malformed || counts.oversized)) {
-      rollbackStoreTransaction(tx);
-      sink.warn(`Antigravity ${path.basename(file)}: no usable records and some were skipped; previous accepted data retained.`);
-      return { dirty: false, aborted: false };
-    }
+    if (usages === 0 && (counts.malformed || counts.oversized)) return retain("no usable records and some were skipped");
     db.exec("COMMIT");
     const warnings = [];
     const notes = [];
