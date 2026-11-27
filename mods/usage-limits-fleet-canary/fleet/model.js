@@ -8,8 +8,10 @@ import { THIS_COMPUTER, chipText } from "./identity.js";
 const NO_IDENTITY = { localOs: null, localName: null, remoteOs: () => null };
 // Not a valid route (routes start with a letter or digit), so it can share the collapsed list with them.
 export const LOCAL_COLLAPSE_KEY = "@local";
-// Copilot and Antigravity appear only where the machine reports them; Claude and Codex always do.
+// Optional providers appear only where a remote machine reports them, or where this computer's helper
+// has found them; the others always do.
 const providersFor = (machine) => REMOTE_PROVIDERS.filter((p) => !p.optional || machine.states?.[p.id]);
+const localProviders = (states) => PROVIDERS.filter((p) => !p.optional || states[p.id]?.installed === true);
 const current = (w, now) => Number.isFinite(w.percent) && w.percent >= 0 && w.percent <= 100
   && (w.resetsAt == null || w.resetsAt > now);
 export const isFable = (w) => /^weekly_scoped:fable$/i.test(w.id);
@@ -91,10 +93,11 @@ export function fleetModels(projection, prefs, selection, localSource, identity 
   const localDetails = states.claude && !(localFable && fableEnabled(prefs)) ? { ...states, claude: {
     ...states.claude, report: withoutFable(states.claude.report), lastGood: withoutFable(states.claude.lastGood),
   } } : states;
-  const localGroups = compactGroups(states, PROVIDERS, prefs, localSource.now);
+  const providers = localProviders(states);
+  const localGroups = compactGroups(states, providers, prefs, localSource.now);
   const local = { route: null, label: THIS_COMPUTER, chip: identity.localName ? chipText(identity.localOs, identity.localName) : THIS_COMPUTER, groups: localGroups, summary: tightSummary(localGroups),
     collapsed: collapsed.has(LOCAL_COLLAPSE_KEY),
-    panel: providerDetails(localDetails, PROVIDERS, prefs, localSource.now, false), fable: localFable };
+    panel: providerDetails(localDetails, providers, prefs, localSource.now, false), fable: localFable };
   const remotes = machines.map(forRemote);
   const groupFor = (machine) => remotes.find(({ route }) => route === machine.route) ?? forRemote(machine);
   const groups = mode === "combined"

@@ -395,7 +395,7 @@ test("the local and remote Antigravity parsers agree on windows, percent, reset,
     ["other labels dropped", edited({ limits: [limit("Monthly allowance", 0.9), limit("Opus Weekly", 0.9),
       limit("Daily", 0.9), limit("Weekly (7-day)", 0.3)] }), 5],
     ["empty accounts", edited({ accounts: [] }), 5],
-    ...["Free", " ULTRA ", "pro", "Enterprise", "", 7, undefined]
+    ...["Free", " ULTRA ", "pro", "Pro 5x", "ultra 20x", "Enterprise", "", 7, undefined]
       .map((tierLabel) => [`tier ${tierLabel}`, edited({ tierLabel }), 5]),
   ];
   for (const [name, text, age] of cases) {
