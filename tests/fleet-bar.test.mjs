@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { registerHooks } from "node:module";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { parseHostRecord } from "../scripts/quota/host.mjs";
 
 const stubUrl = new URL("./helpers/gpui-stub.mjs", import.meta.url).href;
 registerHooks({
@@ -19,7 +25,10 @@ const { VERSION } = await import(`${root}/fleet-quota/protocol.mjs`);
 const { effectivePrefs } = await import(`${root}/lib/prefs.js`);
 const { DENSITY } = await import(`${root}/lib/view.js`);
 const { fleetBar } = await import(`${root}/fleet/model.js`);
-const { PROVIDERS } = await import(`${root}/providers/index.js`);
+const { ALL_PROVIDERS, PROVIDERS } = await import(`${root}/providers/index.js`);
+const { default: agy } = await import(`${root}/providers/agy.js`);
+const { NEVER_FETCHED, fetchedState } = await import(`${root}/lib/fetch-state.js`);
+const { barModel } = await import(`${root}/lib/view.js`);
 const { limitsPanel } = await import(`${root}/ui/panel.js`);
 const { statusBar } = await import(`${root}/ui/bar.js`);
 const { providerIcon } = await import(`${root}/ui/kit.js`);
@@ -111,7 +120,8 @@ test("copilot and antigravity appear only for machines that report them", () => 
 test("with no remote machines the model is absent and the local provider list is unchanged", () => {
   const { model } = harness(project());
   assert.equal(model(), null);
-  assert.deepEqual(PROVIDERS.map((p) => p.id), ["claude", "codex", "opencode", "pi"]);
+  assert.deepEqual(PROVIDERS.map((p) => p.id), ["claude", "codex", "agy", "opencode", "pi"]);
+  assert.equal(new Set(ALL_PROVIDERS.map((p) => p.id)).size, ALL_PROVIDERS.length, "no provider is listed twice");
   const local = harness(project(linuxHost())).model(null).local;
   assert.deepEqual(local.groups.map((g) => g.providerId), ["claude", "codex"]);
 });
@@ -344,4 +354,242 @@ test("on macos the local name comes from scutil first", async () => {
   assert.deepEqual(calls, ["scutil"]);
   assert.equal(identity.snapshot().localName, "Mateos-MacBook-Pro");
   assert.equal(identity.snapshot().localOs, "Mac");
+});
+
+const fixture = (name) => readFile(new URL(`./fixtures/omarchy/${name}.json`, import.meta.url), "utf8");
+const agyText = await fixture("agy");
+const agyRecord = JSON.parse(agyText);
+const fetchedAt = Math.floor(agyRecord.limitsFetchedAt / 1000);
+const edited = (change) => JSON.stringify({ ...agyRecord, ...change });
+const limit = (label, percent = 0, resetsAt = "") => ({ label, percent, resetsAt });
+const iso = (seconds) => new Date(seconds * 1000).toISOString();
+
+function assertNoReading(report, why) {
+  assert.ok(["error", "unavailable"].includes(report.status), why);
+  assert.ok(!report.fallback, `${why}: no fallback`);
+  assert.deepEqual(report.windows, [], why);
+  assert.ok(typeof report.message === "string" && report.message.length > 0, `${why}: message`);
+}
+
+test("the local Antigravity parser reads a fresh Omarchy record", () => {
+  assert.equal(agy.helper, "helpers/agy-record.sh");
+  assert.equal(agy.optional, true);
+  assert.deepEqual(agy.parse(agyText, fetchedAt + 5), { status: "ok", message: null, plan: "pro", observedAt: fetchedAt,
+    source: "Omarchy collector", windows: [
+      win("session", "5h", "5-hour", 0, null, 18000),
+      win("weekly_all", "wk", "Weekly", 0, null, 604800),
+    ] });
+});
+
+test("the local and remote Antigravity parsers agree on windows, percent, reset, time and plan", async () => {
+  const oldText = await fixture("agy-old");
+  const percents = [0, 0.004, 0.29, 0.57, 0.999, 1];
+  const cases = [
+    ["fixture", agyText, 5],
+    ["old fixture", oldText, 5 * DAY],
+    ...percents.map((p) => [`percent ${p}`, edited({ limits: [limit("Session", p), limit("Weekly", p)] }), 5]),
+    ["reset times", edited({ limits: [limit("Session", 0.4, "2026-12-01T10:00:00+02:00"),
+      limit("Weekly", 0.2, "2026-12-03T10:00:00.5Z")] }), 5],
+    ["title only", edited({ limits: [{ title: "Session", percent: 0.1, resetsAt: "" },
+      { label: "other", title: "Weekly", percent: 0.2, resetsAt: "" }] }), 5],
+    ["other labels dropped", edited({ limits: [limit("Monthly allowance", 0.9), limit("Opus Weekly", 0.9),
+      limit("Daily", 0.9), limit("Weekly (7-day)", 0.3)] }), 5],
+    ["empty accounts", edited({ accounts: [] }), 5],
+    ...["Free", " ULTRA ", "pro", "Enterprise", "", 7, undefined]
+      .map((tierLabel) => [`tier ${tierLabel}`, edited({ tierLabel }), 5]),
+  ];
+  for (const [name, text, age] of cases) {
+    const now = Math.floor(JSON.parse(text).limitsFetchedAt / 1000) + age;
+    const remote = parseHostRecord("agy", text, now);
+    assert.equal(remote.status, "ok", name);
+    const report = agy.parse(text, now);
+    assert.equal(report.status === "ok", remote.current, `${name}: current`);
+    const reading = remote.current ? report : report.fallback;
+    assert.equal(reading.status, "ok", name);
+    assert.equal(reading.source, "Omarchy collector", name);
+    assert.deepEqual(reading.windows, remote.reading.windows, name);
+    assert.equal(reading.observedAt, remote.reading.observedAt, name);
+    assert.equal(reading.plan, remote.reading.plan, name);
+  }
+});
+
+test("a not-current Antigravity record is a failed report with a dated fallback", () => {
+  assert.equal(agy.parse(agyText, fetchedAt + 899).status, "ok");
+  const cases = [
+    ["limitsStale", edited({ limitsStale: true }), 5],
+    ["not ready", edited({ ready: false }), 5],
+    ["900 s old", agyText, 900],
+    ["just under 14 days", agyText, 14 * DAY - 1],
+    ["every window reset", edited({ limits: [limit("Session", 0.5, iso(fetchedAt - 1)),
+      limit("Weekly", 0.5, iso(fetchedAt + 5))] }), 5],
+  ];
+  for (const [name, text, age] of cases) {
+    const report = agy.parse(text, fetchedAt + age);
+    assert.equal(report.status, "error", name);
+    assert.equal(report.source, "Omarchy collector", name);
+    assert.ok(typeof report.message === "string" && report.message.length > 0, `${name}: message`);
+    assert.deepEqual(report.windows, [], name);
+    assert.equal(report.fallback?.status, "ok", name);
+    assert.equal(report.fallback.source, "Omarchy collector", name);
+    assert.equal(report.fallback.observedAt, fetchedAt, name);
+    assert.equal(report.fallback.windows.length, 2, name);
+  }
+});
+
+test("an unusable Antigravity record gives no reading, never throws and never echoes the record", () => {
+  const marker = "record-text-marker";
+  const one = (entry) => edited({ limits: [{ ...limit("Session"), ...entry }] });
+  const cases = [
+    ["empty input", ""],
+    ["broken JSON", `{"id":"agy","name":"${marker}"`],
+    ["null", "null"],
+    ["array", "[]"],
+    ["text", JSON.stringify(marker)],
+    ["wrong schemaVersion", edited({ schemaVersion: 2, name: marker })],
+    ["wrong id", edited({ id: marker })],
+    ["ready not boolean", edited({ ready: marker })],
+    ["limitsStale not boolean", edited({ limitsStale: marker })],
+    ["non-empty accounts", edited({ accounts: [{ name: marker }] })],
+    ["accounts not a list", edited({ accounts: marker })],
+    ["limits not a list", edited({ limits: marker })],
+    ["limit not an object", edited({ limits: [null] })],
+    ["no limits", edited({ limits: [] })],
+    ["only other labels", edited({ limits: [limit(marker)] })],
+    ["duplicate window", edited({ limits: [limit("Session"), limit("Session (5-hour)")] })],
+    ["percent above 1", one({ percent: 1.01 })],
+    ["percent below 0", one({ percent: -0.01 })],
+    ["percent not a number", one({ percent: marker })],
+    ["percent missing", one({ percent: undefined })],
+    ["reset not a date", one({ resetsAt: marker })],
+    ["reset not ISO", one({ resetsAt: "Dec 1 2026 10:00" })],
+    ["reset missing", one({ resetsAt: undefined })],
+    ["fetch time missing", edited({ limitsFetchedAt: undefined })],
+    ["fetch time zero", edited({ limitsFetchedAt: 0 })],
+    ["fetch time not a number", edited({ limitsFetchedAt: marker })],
+    ["fetch time in the future", agyText, -1],
+    ["14 days old", agyText, 14 * DAY],
+  ];
+  for (const [name, text, age = 5] of cases) {
+    const report = agy.parse(text, fetchedAt + age);
+    assertNoReading(report, name);
+    assert.ok(!JSON.stringify(report).includes(marker), `${name}: record text in the report`);
+  }
+});
+
+const helper = fileURLToPath(new URL(`${root}/helpers/agy-record.sh`, import.meta.url));
+
+async function helperSandbox(t) {
+  const dir = await mkdtemp(path.join(tmpdir(), "agy-record-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const home = path.join(dir, "home");
+  const xdg = path.join(dir, "state");
+  const recordIn = (state) => path.join(state, "omarchy", "agents", "usage", "agy.json");
+  const write = async (state, text) => {
+    await mkdir(path.dirname(recordIn(state)), { recursive: true });
+    await writeFile(recordIn(state), text);
+  };
+  // The environment is built from scratch so the real home is never read.
+  const run = (env = { XDG_STATE_HOME: xdg }) => spawnSync("sh", [helper],
+    { cwd: dir, env: { PATH: process.env.PATH, HOME: home, ...env }, encoding: "utf8", timeout: 10_000 });
+  const homeState = path.join(home, ".local", "state");
+  return { dir, xdg, homeState, recordIn, write, run };
+}
+
+test("the Antigravity helper prints the record from XDG_STATE_HOME", async (t) => {
+  const { xdg, homeState, write, run } = await helperSandbox(t);
+  await write(xdg, agyText);
+  await write(homeState, "home record\n");
+  const got = run();
+  assert.equal(got.status, 0, got.stderr);
+  assert.equal(got.stdout, agyText);
+});
+
+test("the Antigravity helper falls back to $HOME/.local/state", async (t) => {
+  const { homeState, write, run } = await helperSandbox(t);
+  await write(homeState, agyText);
+  for (const env of [{}, { XDG_STATE_HOME: "" }]) {
+    const got = run(env);
+    assert.equal(got.status, 0, got.stderr);
+    assert.equal(got.stdout, agyText);
+  }
+});
+
+test("the Antigravity helper prints at most 65536 bytes", async (t) => {
+  const { xdg, write, run } = await helperSandbox(t);
+  await write(xdg, "x".repeat(70_000));
+  const got = run();
+  assert.equal(got.status, 0, got.stderr);
+  assert.equal(got.stdout, "x".repeat(65_536));
+});
+
+test("the Antigravity helper exits 127 for a missing file, a symlink or a directory", async (t) => {
+  const { dir, xdg, recordIn, write, run } = await helperSandbox(t);
+  // A missing script also exits 127, so first show that this one runs.
+  await write(xdg, agyText);
+  assert.equal(run().status, 0, "a present record is read");
+  const refused = (why) => {
+    const got = run();
+    assert.deepEqual([got.status, got.stdout], [127, ""], why);
+  };
+  await rm(recordIn(xdg));
+  refused("missing file");
+  const target = path.join(dir, "target.json");
+  await writeFile(target, agyText);
+  await symlink(target, recordIn(xdg));
+  refused("symlink");
+  await rm(recordIn(xdg));
+  await mkdir(recordIn(xdg));
+  refused("directory");
+});
+
+const localRecord = (change = {}) => edited({ limitsFetchedAt: (NOW - MIN) * 1000, limits: [
+  limit("Session (5-hour)", 0.4, iso(NOW + 3600)), limit("Weekly (7-day)", 0.25, iso(NOW + 3 * DAY)),
+], ...change });
+const answered = (stdout, code = 0) => ({ agy: fetchedState(NEVER_FETCHED, agy, { code, stdout }, NOW) });
+const NOT_INSTALLED = 127;
+
+function localHost(local) {
+  const projection = project(linuxHost());
+  return harness(projection).adapter.model(projection, null, effectivePrefs(), { local, now: NOW });
+}
+
+test("a local Antigravity record shows in the bar and in this computer's fleet segment", () => {
+  const local = answered(localRecord());
+  const bar = group(barModel(local, effectivePrefs(), NOW), "agy");
+  assert.ok(bar, "agy is in the local bar");
+  assert.equal(bar.mark, null);
+  assert.equal(bar.dim, false);
+  assert.deepEqual(bar.segments.map((s) => [s.short, s.text]), [["5h", "40%"], ["wk", "25%"]]);
+  const models = localHost(local);
+  assert.deepEqual(models.local.groups.map((g) => g.providerId), ["claude", "codex", "agy"]);
+  assert.deepEqual(group(models.local, "agy").segments.map((s) => s.short), ["5h", "wk"]);
+  assert.equal(detail(models.local, "agy").source, "Omarchy collector");
+  assert.equal(detail(models.local, "agy").plan, "Pro");
+  assert.ok(stub.findById(drawPanel(models), "ul-local-refresh-agy"));
+});
+
+test("a stale local Antigravity record is marked failed and keeps its dimmed last values", () => {
+  const local = answered(localRecord({ limitsStale: true }));
+  const bar = group(barModel(local, effectivePrefs(), NOW), "agy");
+  assert.ok(bar, "agy is in the local bar");
+  assert.equal(bar.mark, "!");
+  assert.equal(bar.dim, true);
+  assert.deepEqual(bar.segments.map((s) => [s.short, s.text]), [["5h", "40%"], ["wk", "25%"]]);
+  assert.ok(group(localHost(local).local, "agy"), "a stale record still counts as installed");
+});
+
+test("this computer's fleet segment omits Antigravity until a record is found", () => {
+  assert.ok(group(localHost(answered(localRecord())).local, "agy"), "a record is shown");
+  const missing = answered("", NOT_INSTALLED);
+  assert.equal(group(barModel(missing, effectivePrefs(), NOW), "agy"), undefined, "no record, no bar group");
+  for (const [name, local] of [["no record", missing], ["not answered yet", {}], ["never fetched", { agy: NEVER_FETCHED }]]) {
+    const models = localHost(local);
+    assert.equal(group(models.local, "agy"), undefined, `${name}: compact`);
+    assert.equal(group({ groups: models.local.summary }, "agy"), undefined, `${name}: summary`);
+    assert.equal(detail(models.local, "agy"), undefined, `${name}: details`);
+    const tree = drawPanel(models);
+    assert.ok(!stub.findById(tree, "ul-local-refresh-agy"), `${name}: panel`);
+    assert.ok(stub.findById(tree, "ul-local-refresh-claude"), `${name}: other local providers stay`);
+    assert.ok(stub.findById(tree, "ul-remote-refresh-arch-agy"), `${name}: the remote machine keeps it`);
+  }
 });
