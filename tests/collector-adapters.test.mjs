@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { dedupKeyFor, loadStore } from "../mods/insights/core/store.mjs";
+import { dedupKeyFor, loadStore, saveStore } from "../mods/insights/core/store.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const collector = path.join(here, "..", "mods", "insights", "collector.mjs");
@@ -597,6 +597,24 @@ test("Codex responses with their own ids count again when the counters repeat af
     { id: "codex", label: "Codex", adapter: "codex", enabled: true, roots: ["~/.codex/sessions"] },
   ]);
   assert.equal(totalTokens(snapshot.rows), 60);
+});
+
+// Version 5 is the last parser that counted a fork's inherited total. An
+// unchanged rollout it stored must still be read again, or the overcount stays.
+test("Codex history stored by parser version 5 is read again", async () => {
+  const context = await env();
+  await placeFixture(context, ".codex/sessions/rollout.jsonl", "codex-fork-inherited-total.jsonl");
+  await configure(context, [
+    { id: "codex", label: "Codex", adapter: "codex", enabled: true, roots: ["~/.codex/sessions"] },
+  ]);
+  const { store } = await loadStore(context.store);
+  const [entry] = Object.values(store.files);
+  entry.state.codexParserVersion = 5;
+  entry.rows[0].input += 5500;
+  await saveStore(context.store, store);
+  const result = await run(["snapshot", "--store", context.store, "--home", context.home]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(totalTokens(JSON.parse(result.stdout).rows), 250);
 });
 
 test("Codex paginated fork counts its own responses, not the inherited parent total", async () => {
