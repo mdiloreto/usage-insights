@@ -582,6 +582,23 @@ test("Codex per-response counts keep the identity stored history already uses", 
   assert.ok(Object.hasOwn(store.dedup, stored));
 });
 
+test("Codex responses with their own ids count again when the counters repeat after a restart", async () => {
+  const context = await env();
+  const target = path.join(context.home, ".codex/sessions/rollout.jsonl");
+  await mkdir(path.dirname(target), { recursive: true });
+  const usage = (input) => ({ input_tokens: input, output_tokens: 0 });
+  const counts = [["a", 20, 20], ["b", 30, 10], ["c", 20, 20], ["d", 30, 10]].map(([id, total, last], index) => ({
+    type: "event_msg",
+    timestamp: `2026-03-12T10:00:0${index}.000Z`,
+    payload: { type: "token_count", response_id: id, info: { total_token_usage: usage(total), last_token_usage: usage(last) } },
+  }));
+  await writeFile(target, counts.map((record) => `${JSON.stringify(record)}\n`).join(""));
+  const snapshot = await configure(context, [
+    { id: "codex", label: "Codex", adapter: "codex", enabled: true, roots: ["~/.codex/sessions"] },
+  ]);
+  assert.equal(totalTokens(snapshot.rows), 60);
+});
+
 test("Codex paginated fork counts its own responses, not the inherited parent total", async () => {
   const rows = await codexRows("codex-fork-inherited-total.jsonl");
   assert.deepEqual(rows.map((row) => row.model), ["child-model"]);

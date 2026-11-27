@@ -921,7 +921,8 @@ function parseCodex(record, ctx) {
         // it). Interleaved chains also re-emit an earlier response later.
         const unmoved = previous
           && Object.keys(current).every((key) => current[key] === previous[key]);
-        const response = makeDedupKey("codex", asString(payload.turn_id ?? payload.root_turn_id, ""),
+        const response = makeDedupKey("codex", session, asString(payload.response_id, ""),
+          asString(payload.turn_id ?? payload.root_turn_id, ""),
           ...Object.values(current), ...Object.values(codexRawTotals(last)));
         if (!isPlainObject(state.countedResponses)) state.countedResponses = {};
         raw = unmoved || state.countedResponses[response] ? {} : last;
