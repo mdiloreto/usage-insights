@@ -111,9 +111,9 @@ test("copilot and antigravity appear only for machines that report them", () => 
 test("with no remote machines the model is absent and the local provider list is unchanged", () => {
   const { model } = harness(project());
   assert.equal(model(), null);
-  assert.deepEqual(PROVIDERS.map((p) => p.id), ["claude", "codex", "opencode", "pi"]);
+  assert.deepEqual(PROVIDERS.map((p) => p.id), ["claude", "codex", "opencode-go", "opencode", "pi"]);
   const local = harness(project(linuxHost())).model(null).local;
-  assert.deepEqual(local.groups.map((g) => g.providerId), ["claude", "codex"]);
+  assert.deepEqual(local.groups.map((g) => g.providerId), ["claude", "codex", "opencode-go"]);
 });
 
 test("copilot is drawn as a one-color glyph and antigravity as a full-color image", () => {

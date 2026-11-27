@@ -115,7 +115,13 @@ sign-in already on the machine being read.
   counts OpenCode and Pi tokens from local files; when it does not find
   OpenCode's database, or `HERDR_USAGE_OPENCODE_BIN` is set, it runs
   `opencode stats` instead, and what that CLI contacts is outside this project.
-  The dashboard only shows what a bar has read.
+  It also reads OpenCode Go limits from the local OpenCode server: it runs
+  `opencode service status`, and only while a server is running,
+  `opencode api GET /api/experimental/usage/limits` (an experimental route).
+  The local server uses its own OpenCode Console sign-in to ask OpenCode for them,
+  and the bar reads no credential. A stopped server or a signed-out Console shows
+  as unavailable, and an OpenCode without that route shows as not installed. The
+  dashboard only shows what a bar has read.
 - **Another machine:** its providers are not asked until you install the quota
   helper there (Linux: `sh scripts/install-quota.sh`, then the same with
   `enroll`) and add that grant by hand to a viewer's enrollment file:
