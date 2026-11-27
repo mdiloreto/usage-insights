@@ -74,27 +74,31 @@ function remoteStates(machine, now, prefs, providers) {
 
 const isAgy = (group) => group.providerId === "agy";
 
-// What one machine's Antigravity can offer the bar, or null where it never had a reading.
-function agyReading(host, state) {
+// What one machine's Antigravity can offer the bar, or null where it never had a reading. A reading is
+// current when it has something to show, unless the caller judges that apart from what is shown.
+function agyReading(host, state, current) {
   const group = host.groups.find(isAgy);
   if (!group) return null;
-  if (group.segments.length) return { host, group, live: true, observedAt: state.report.observedAt };
-  const times = [state?.report, state?.lastGood, state?.historyDetail]
+  const live = current ?? group.segments.length > 0;
+  if (live) return { host, group, live, observedAt: state.report.observedAt };
+  const times = [state.lastGood, state.historyDetail]
     .filter((reading) => reading?.windows.length).map((reading) => reading.observedAt);
-  return times.length ? { host, group, live: false, observedAt: Math.max(...times) } : null;
+  return times.length ? { host, group, live, observedAt: Math.max(...times) } : null;
 }
 
 // Which machines the bar shows must not hide Antigravity: when none of them has a current reading, the
 // freshest one elsewhere joins under its own machine's chip. A dated one joins only if they hold none at all.
 function withLentAgy(shown, readings) {
   const onBar = readings.filter(({ host }) => shown.includes(host));
-  const live = readings.filter((reading) => reading.live);
   if (onBar.some((reading) => reading.live)) return shown;
-  const lenders = live.length || onBar.length ? live : readings;
+  const live = readings.filter((reading) => reading.live && reading.group.segments.length);
+  if (!live.length && onBar.length) return shown;
+  const lenders = live.length ? live : readings.filter((reading) => !reading.live);
   if (!lenders.length) return shown;
   const { host: { label, chip }, group } = lenders.reduce((best, next) => (next.observedAt > best.observedAt ? next : best));
   // No route: only this computer's own segment has the null route that keeps session numbers on the bar.
-  return [...shown.map((host) => ({ ...host, groups: host.groups.filter((g) => !isAgy(g)) })), { label, chip, groups: [group] }];
+  return [...shown.map((host) => ({ ...host, groups: host.groups.filter((g) => !isAgy(g)) })),
+    { label, chip, groups: [group], lent: true }];
 }
 
 export function fleetModels(projection, prefs, selection, localSource, identity = NO_IDENTITY) {
@@ -128,7 +132,10 @@ export function fleetModels(projection, prefs, selection, localSource, identity 
   const groups = mode === "combined"
     ? [local, selected ? groupFor(selected) : { label: choices.length ? "Choose remote" : "No remote available", groups: [] }]
     : [activeRemote ? groupFor(activeRemote) : activeMachine === null ? local : { label: "Active machine unknown", groups: [] }];
-  const agyReadings = [agyReading(local, states.agy), ...remotes.map((host) => agyReading(host, host.machine.states?.agy))];
+  // This computer's is judged on every window, so hiding them does not bring another machine's onto the bar.
+  const currentHere = currentWindows(states.agy, localSource.now).length > 0;
+  const agyReadings = [agyReading(local, states.agy, currentHere),
+    ...remotes.map((host) => agyReading(host, host.machine.states?.agy))];
   const bar = isShown(prefs, "agy") ? withLentAgy(groups, agyReadings.filter(Boolean)) : groups;
   return { local, remotes, groups: bar, selection };
 }
@@ -139,8 +146,18 @@ const CHIP_FRAME = 12;
 const hostWidth = (host, density, named) => labelWidth(hostChip(host)) + CHIP_FRAME + host.groups.reduce((sum, g) =>
   sum + (named ? labelWidth(g.name) : 0) + groupWidth(g, density) + 10 + (g.mark == null ? 0 : 16), 0);
 
-export function fleetBar(models, width, numbers, showBars) {
-  const { groups } = models;
+const showsNumbers = (layout) => layout.groups?.some((host) =>
+  host.groups.some((g) => g.segments.length > 0 || g.spend != null)) === true;
+
+export function fleetBar({ groups }, width, numbers, showBars) {
+  const layout = barLayout(groups, width, numbers, showBars);
+  if (!layout.labels) return layout;
+  // A lent entry never costs the other machines their numbers.
+  const own = barLayout(groups.filter((host) => !host.lent), width, numbers, showBars);
+  return showsNumbers(own) ? own : layout;
+}
+
+function barLayout(groups, width, numbers, showBars) {
   if (!groups.some((host) => host.route === null)) numbers = [];
   const sessionWidth = sessionNumbersWidth(numbers);
   const room = width - 24 - sessionWidth - 28;

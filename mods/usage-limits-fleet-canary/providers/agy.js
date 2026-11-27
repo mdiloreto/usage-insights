@@ -7,7 +7,12 @@ const STALE_AFTER_S = 15 * 60;
 const HISTORY_S = 14 * 86_400;
 const SESSION = { id: "session", short: "5h", long: "5-hour", durationSec: 5 * 3600 };
 const WEEKLY = { id: "weekly_all", short: "wk", long: "Weekly", durationSec: 7 * 86_400 };
-const KINDS = new Map([["Session", SESSION], ["Session (5-hour)", SESSION], ["Weekly", WEEKLY], ["Weekly (7-day)", WEEKLY]]);
+// Null marks a label of a kind this provider does not show, which settles the entry whatever its title says.
+const KINDS = new Map([["Session", SESSION], ["Session (5-hour)", SESSION], ["Weekly", WEEKLY], ["Weekly (7-day)", WEEKLY],
+  ["Monthly allowance", null], ...["Opus", "Sonnet", "Haiku", "Fable", "Cowork"].map((scope) => [`${scope} Weekly`, null])]);
+const MAX_LIMITS = 32;
+const MAX_LABEL = 80;
+const UNSAFE = /[@\p{Cc}\p{Zl}\p{Zp}]/u;
 const PLANS = new Set(["free", "pro", "ultra"]);
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 
@@ -26,11 +31,18 @@ function resetOf(value) {
   return seconds > 0 ? seconds : undefined;
 }
 
+const isUnsafe = (text) => typeof text === "string" && (text.length > MAX_LABEL || UNSAFE.test(text));
+
+function kindOf({ label, title }) {
+  if (isUnsafe(label) || isUnsafe(title)) return null;
+  return KINDS.has(label) ? KINDS.get(label) : KINDS.get(title);
+}
+
 function windowsOf(limits) {
-  if (!Array.isArray(limits) || !limits.every(isObject)) return null;
+  if (!Array.isArray(limits) || limits.length > MAX_LIMITS || !limits.every(isObject)) return null;
   const windows = [];
   for (const entry of limits) {
-    const kind = KINDS.get(entry.label) ?? KINDS.get(entry.title);
+    const kind = kindOf(entry);
     if (!kind) continue;
     const percent = percentOf(entry.percent);
     const resetsAt = resetOf(entry.resetsAt);

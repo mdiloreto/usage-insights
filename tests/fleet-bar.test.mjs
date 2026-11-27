@@ -117,7 +117,7 @@ test("copilot and antigravity appear only for machines that report them", () => 
   assert.deepEqual(arch.groups.map((g) => g.providerId), ["claude", "codex"]);
 });
 
-test("with no remote machines the model is absent and the local provider list is unchanged", () => {
+test("with no remote machines the model is absent, and an unanswered Antigravity stays out of the local host", () => {
   const { model } = harness(project());
   assert.equal(model(), null);
   assert.deepEqual(PROVIDERS.map((p) => p.id), ["claude", "codex", "agy", "opencode", "pi"]);
@@ -244,8 +244,9 @@ test("the bar drops provider names, keeping icons and segments, before it falls 
 
 const { createIdentity, cleanName, osFromUname } = await import(`${root}/fleet/identity.js`);
 
-const barText = (fleet) => stub.textOf(stub.nodeOf(statusBar({ fleet, detailsOpen: null, panel: null, border: false,
-  onResize() {}, onHover() {}, toggleDetails() {} }, stub.theme)));
+const barTree = (fleet) => stub.nodeOf(statusBar({ fleet, detailsOpen: null, panel: null, border: false,
+  onResize() {}, onHover() {}, toggleDetails() {} }, stub.theme));
+const barText = (fleet) => stub.textOf(barTree(fleet));
 const chipsFor = (local, remote) => ({ localOs: "Mac", localName: local, remoteOs: () => remote });
 const combinedModel = (identity) => {
   const projection = project(linuxHost());
@@ -397,6 +398,20 @@ test("the local and remote Antigravity parsers agree on windows, percent, reset,
     ["empty accounts", edited({ accounts: [] }), 5],
     ...["Free", " ULTRA ", "pro", "Pro 5x", "ultra 20x", "Enterprise", "", 7, undefined]
       .map((tierLabel) => [`tier ${tierLabel}`, edited({ tierLabel }), 5]),
+    ...["a@b", "a\u0007b", "a\u0085b", "a\u2028b", "a\u2029b", "x".repeat(81)].flatMap((unsafe) => [
+      [`unsafe title ${JSON.stringify(unsafe)}`, edited({ limits: [{ ...limit("Session", "not read"), title: unsafe },
+        limit("Weekly", 0.3)] }), 5],
+      [`unsafe label ${JSON.stringify(unsafe)}`, edited({ limits: [{ ...limit(unsafe, 0.9), title: "Session" },
+        limit("Weekly", 0.3)] }), 5],
+    ]),
+    ["longest safe title", edited({ limits: [{ ...limit("Session", 0.1), title: "x".repeat(80) }] }), 5],
+    ...["Monthly allowance", ...["Opus", "Sonnet", "Haiku", "Fable", "Cowork"].map((scope) => `${scope} Weekly`)]
+      .map((label) => [`label ${label} over its title`,
+        edited({ limits: [{ ...limit(label, 0.9), title: "Session" }, limit("Weekly", 0.3)] }), 5]),
+    ["title of another kind", edited({ limits: [{ ...limit("Session", 0.1), title: "Monthly allowance" }] }), 5],
+    ["label that is not text", edited({ limits: [{ ...limit(["Monthly allowance"], 0.1), title: "Session" }] }), 5],
+    ["email labels", JSON.stringify({ ...JSON.parse(await fixture("email-label")), id: "agy" }), 5],
+    ["32 limits", edited({ limits: [limit("Session"), ...Array.from({ length: 31 }, () => limit("Daily"))] }), 5],
   ];
   for (const [name, text, age] of cases) {
     const now = Math.floor(JSON.parse(text).limitsFetchedAt / 1000) + age;
@@ -411,6 +426,9 @@ test("the local and remote Antigravity parsers agree on windows, percent, reset,
     assert.equal(reading.observedAt, remote.reading.observedAt, name);
     assert.equal(reading.plan, remote.reading.plan, name);
   }
+  const crowded = edited({ limits: [limit("Session"), ...Array.from({ length: 32 }, () => limit("Daily"))] });
+  assert.equal(parseHostRecord("agy", crowded, fetchedAt + 5).status, "malformed");
+  assertNoReading(agy.parse(crowded, fetchedAt + 5), "33 limits");
 });
 
 test("a not-current Antigravity record is a failed report with a dated fallback", () => {
@@ -614,6 +632,7 @@ function barFleet(remotes, { local = {}, focused = null, mode = "follow", select
 const onBar = (models) => models.groups.map((h) => [h.chip ?? h.label, h.groups.map((g) => g.providerId)]);
 const lent = (models) => models.groups.at(-1);
 const MAC = "Mac · laptop";
+const agyFrames = (fleet) => stub.findAll(barTree(fleet), (n) => /^ul-fleet-provider-\d+-agy$/.test(n.id));
 
 test("Follow Space in a local space lends a remote machine's current Antigravity reading", () => {
   const models = barFleet([machine("arch", liveAgy(MIN, 30))], { local: noLocalAgy() });
@@ -621,8 +640,10 @@ test("Follow Space in a local space lends a remote machine's current Antigravity
   assert.deepEqual(lent(models).groups[0].segments.map((s) => [s.short, s.text]), [["5h", "30%"], ["wk", "30%"]]);
   assert.deepEqual(models.local.groups.map((g) => g.providerId), ["claude", "codex"]);
   assert.deepEqual(models.remotes[0].groups.map((g) => g.providerId), ["claude", "codex", "agy"]);
-  const text = barText(fleetBar(models, 2400, [], true));
-  assert.ok(text.includes("Linux · arch") && text.includes("Antigravity") && text.includes("30%"));
+  const fleet = fleetBar(models, 2400, [], true);
+  assert.ok(barText(fleet).includes("Linux · arch"));
+  assert.equal(agyFrames(fleet).length, 1);
+  assert.match(stub.textOf(agyFrames(fleet)[0]), /30%/);
 });
 
 test("Follow Space in a remote space lends this computer's reading and leaves the details alone", () => {
@@ -710,14 +731,81 @@ test("session numbers follow this computer's own segment, never a lent entry", (
   assert.ok(barText(fleetBar(trimmed, 2400, numbers, true)).includes("ctx 12%"));
 });
 
-test("a lent entry keeps its machine chip at every width, including the labels-only fallback", () => {
-  const models = barFleet([machine("arch"), machine("studio", liveAgy(MIN))], { local: noLocalAgy(), focused: "arch" });
+test("a lent entry is labelled wherever it is shown, and is left out before the bar loses its numbers", () => {
+  const remotes = [machine("arch"), machine("studio", liveAgy(MIN))];
+  const models = barFleet(remotes, { local: noLocalAgy(), focused: "arch" });
   const stages = new Set();
-  for (let width = 60; width <= 1600; width += 4) {
+  for (let width = 60; width <= 1600; width += 2) {
     const fleet = fleetBar(models, width, [], true);
-    stages.add(fleet.labels ? "labels" : "groups");
-    if (fleet.labels) assert.deepEqual(fleet.labels, ["Linux · arch", "Linux · studio"], `width ${width}`);
-    else assert.ok(barText(fleet).includes("Linux · studio") && barText(fleet).includes("10%"), `width ${width}`);
+    if (fleet.labels) {
+      stages.add("labels");
+      assert.deepEqual(fleet.labels, ["Linux · arch", "Linux · studio"], `width ${width}`);
+    } else if (agyFrames(fleet).length) {
+      stages.add("lent");
+      assert.ok(barText(fleet).includes("Linux · studio"), `width ${width}`);
+      assert.match(stub.textOf(agyFrames(fleet)[0]), /10%/, `width ${width}`);
+    } else {
+      stages.add("left out");
+      assert.deepEqual(fleet.groups.map((h) => h.chip), ["Linux · arch"], `width ${width}`);
+      assert.match(barText(fleet), /%/, `width ${width}`);
+    }
   }
-  assert.deepEqual([...stages].sort(), ["groups", "labels"]);
+  assert.deepEqual([...stages].sort(), ["labels", "left out", "lent"]);
+  // With no other numbers to keep, the lent machine's chip stays at every width.
+  const dashes = barFleet([machine("studio", liveAgy(MIN))], { local: noLocalAgy() });
+  for (let width = 60; width <= 1600; width += 2) {
+    const fleet = fleetBar(dashes, width, [], true);
+    const chips = fleet.labels ?? fleet.groups.map((h) => h.chip);
+    assert.deepEqual(chips, [MAC, "Linux · studio"], `dashes at width ${width}`);
+  }
+});
+
+const localWindow = (percent) => ({ installed: true, lastGood: null, report: { status: "ok",
+  ...current("test", NOW - MIN, [win("session", "5h", "5-hour", percent, NOW + 3600, 18000)]) } });
+
+test("a lent entry never costs this computer its numbers", () => {
+  const local = { claude: localWindow(41), codex: localWindow(52), ...noLocalAgy() };
+  const models = barFleet([machine("arch", datedAgy(DAY)), machine("studio", liveAgy(MIN, 30))], { local });
+  const alone = { ...models, groups: models.groups.slice(0, 1) };
+  const stages = new Set();
+  for (let width = 60; width <= 1600; width += 2) {
+    const fleet = fleetBar(models, width, [], true);
+    const without = fleetBar(alone, width, [], true);
+    if (without.labels) {
+      stages.add("labels");
+      assert.deepEqual(fleet.labels, [MAC, "Linux · studio"], `width ${width}`);
+      continue;
+    }
+    assert.ok(!fleet.labels, `width ${width}: the numbers stay`);
+    assert.match(barText(fleet), /41%.*52%/, `width ${width}`);
+    if (agyFrames(fleet).length) {
+      stages.add("lent");
+      assert.match(stub.textOf(agyFrames(fleet)[0]), /30%/, `width ${width}`);
+    } else {
+      stages.add("left out");
+      assert.deepEqual(fleet, without, `width ${width}`);
+    }
+  }
+  assert.deepEqual([...stages].sort(), ["labels", "left out", "lent"]);
+});
+
+test("hiding this computer's Antigravity windows does not bring another machine's onto its bar", () => {
+  const prefs = effectivePrefs({ hiddenWindows: ["agy:session", "agy:weekly_all"] });
+  const remotes = [machine("arch", liveAgy(MIN, 30))];
+  assert.equal(lent(barFleet(remotes, { local: noLocalAgy(), prefs })).chip, "Linux · arch", "without a reading here, one is lent");
+  const here = barFleet(remotes, { local: localAgy(MIN), prefs });
+  assert.deepEqual(here.groups, [here.local]);
+  assert.deepEqual(group(here.local, "agy").segments, []);
+});
+
+test("a machine lends a current Antigravity reading only when it has a window to show", () => {
+  const away = (hiddenWindows, ...others) => barFleet([machine("arch"), ...others],
+    { local: localAgy(MIN), focused: "arch", prefs: effectivePrefs({ hiddenWindows }) });
+  const part = away(["agy:session"]);
+  assert.deepEqual(lent(part).groups[0].segments.map((s) => s.short), ["wk"]);
+  const all = ["agy:session", "agy:weekly_all"];
+  const none = away(all);
+  assert.deepEqual(none.groups, [none.remotes[0]]);
+  assert.equal(lent(away(all, machine("studio", liveAgy(10 * MIN)))).chip, "Linux · studio");
+  assert.equal(lent(away(all, machine("studio", datedAgy(DAY)))).chip, "Linux · studio");
 });
