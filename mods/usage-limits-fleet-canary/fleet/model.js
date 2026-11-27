@@ -82,7 +82,7 @@ function agyReading(host, state, current) {
   const live = current ?? group.segments.length > 0;
   if (live) return { host, group, live, observedAt: state.report.observedAt };
   const times = [state.lastGood, state.historyDetail]
-    .filter((reading) => reading?.windows.length).map((reading) => reading.observedAt);
+    .filter((reading) => reading?.windows?.length).map((reading) => reading.observedAt);
   return times.length ? { host, group, live, observedAt: Math.max(...times) } : null;
 }
 

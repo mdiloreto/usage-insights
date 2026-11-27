@@ -692,6 +692,12 @@ test("a dated Antigravity reading is lent only when no machine on the bar holds 
   assert.equal(lent(fromHere).groups[0].mark, "—");
 });
 
+test("a stored reading without windows is ignored rather than breaking the bar", () => {
+  const odd = { agy: { installed: true, report: null, lastGood: { observedAt: NOW - MIN } } };
+  const fleet = barFleet([machine("arch", datedAgy(DAY))], { local: odd });
+  assert.deepEqual(onBar(fleet).at(-1), ["Linux · arch", ["agy"]]);
+});
+
 test("a machine that never had an Antigravity reading neither lends one nor keeps one off the bar", () => {
   const neverRead = answered("{}");
   const borrowed = barFleet([machine("arch", datedAgy(DAY))], { local: neverRead });
