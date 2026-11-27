@@ -291,8 +291,11 @@ test("every collapsed summary labels its window, however long the row", () => {
 });
 
 test("a one-machine bar keeps its numbers down to the width its estimate needs", () => {
-  const states = { ...localStates, codex: { installed: false } };
-  const models = harness(project(linuxHost())).adapter.model(project(linuxHost()), null, effectivePrefs(), { local: states, now: NOW });
+  // Only Claude here and no Antigravity anywhere, so exactly one group can reach the bar.
+  const states = { ...localStates, codex: { installed: false }, "opencode-go": { installed: false } };
+  const remote = linuxHost();
+  remote.providers = remote.providers.slice(0, 2);
+  const models = harness(project(remote)).adapter.model(project(remote), null, effectivePrefs(), { local: states, now: NOW });
   assert.deepEqual(models.groups.map((h) => [h.chip, h.groups.map((g) => g.providerId)]), [["This Computer", ["claude"]]]);
   // Chip 106, frame 36, label 21 and number 22, beside the bar's padding and details button (52).
   const width = 106 + 36 + 21 + 22 + 52;
@@ -306,7 +309,8 @@ test("eight providers on two machines still show numbers at 1152px", () => {
   const spend = (today) => ({ report: { status: "ok", observedAt: NOW, windows: [], spend: { today, week: 2 * today } } });
   const limits = (...windows) => ({ report: { status: "ok", observedAt: NOW, windows } });
   const local = { claude: limits(win("weekly_all", "wk", "Weekly", 82, NOW + 3 * DAY, 604800)),
-    codex: limits(win("codex:primary", "5h", "5-hour", 20, NOW + 3600, 18000)), opencode: spend(1_200_000), pi: spend(48_000) };
+    codex: limits(win("codex:primary", "5h", "5-hour", 20, NOW + 3600, 18000)), opencode: spend(1_200_000), pi: spend(48_000),
+    "opencode-go": { installed: false } };
   const remote = linuxHost({ label: "t87" });
   remote.providers[3] = item("agy", { current: current("host", NOW - MIN, goWindows.slice(0, 1)) });
   const projection = project(remote);
