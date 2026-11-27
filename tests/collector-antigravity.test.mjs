@@ -364,6 +364,39 @@ test("Antigravity skips unusable step usage and dates a step without a timestamp
   assert.match(first.warnings.join(" "), /1 generations use session time/);
 });
 
+test("Antigravity retains step-only history when its step becomes unreadable", async (t) => {
+  const context = await env(t); const { db, file } = database(context, "conv", []);
+  addStep(db, 1, { usage: generation().usage });
+  db.close();
+  const first = await run(context, true);
+  assert.equal(total(first), 37);
+  const before = JSON.parse(await readFile(context.store, "utf8"));
+  for (const bad of [Buffer.from([10, 255]), Buffer.alloc(16 * 1024 * 1024 + 1)]) {
+    const changed = new DatabaseSync(file);
+    changed.prepare("UPDATE steps SET metadata = ?").run(bad);
+    changed.close();
+    const failed = await run(context);
+    assert.deepEqual(failed.rows, first.rows);
+    assert.match(failed.warnings.join(" "), /previous accepted data retained/);
+    const retained = JSON.parse(await readFile(context.store, "utf8"));
+    assert.deepEqual(retained.files, before.files);
+    assert.deepEqual(retained.dedup, before.dedup);
+  }
+});
+
+test("Antigravity counts the readable usage on a step whose other payload is malformed", async (t) => {
+  const context = await env(t); const { db } = database(context, "conv", []);
+  const bad = Buffer.from([10, 255]);
+  const usage = (id, input) => generation({ id, input }).usage;
+  addStep(db, 1, { type: 23, usage: usage("bad-summary-usage", 100), summary: bad });
+  db.prepare("INSERT INTO steps VALUES (2, 23, ?)").run(join(msg(1, ts(1790486400)), msg(9, usage("bad-summary", 200)), msg(28, bad)));
+  addStep(db, 3, { type: 23, usage: bad, summary: usage("bad-direct", 400) });
+  db.close();
+  const first = await run(context, true);
+  assert.deepEqual(first.rows.map((r) => [r.messages, r.tokens.input]), [[3, 700]]);
+  assert.match(first.warnings.join(" "), /3 malformed/);
+});
+
 test("Antigravity rolls back a database scan that expires during the step pass", async (t) => {
   const context = await env(t); const { db, file } = database(context); db.close();
   const store = emptyStore();

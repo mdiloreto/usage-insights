@@ -158,16 +158,20 @@ function stepTimestamp(bytes, id) {
   return timestamp(blob(fields, 1));
 }
 
-function decodeStep(bytes, stepType) {
+function decodeStep(bytes, stepType, onMalformed) {
   const fields = protobufFields(bytes);
   const direct = blob(fields, 9);
   const summary = stepType === CHECKPOINT_STEP ? blob(fields, 28) : undefined;
-  const checkpoint = summary && blob(protobufFields(summary), 2);
-  if (!direct && !checkpoint) return null;
+  if (!direct && !summary) return null;
+  // Each payload fails alone, so a bad one cannot hide usage in the other.
+  const attempt = (decode) => { try { return decode(); } catch { onMalformed(); } };
   return {
     created: timestamp(blob(fields, 1)),
-    direct: direct && decodeUsage(direct),
-    checkpoint: checkpoint && decodeUsage(checkpoint),
+    direct: direct && attempt(() => decodeUsage(direct)),
+    checkpoint: summary && attempt(() => {
+      const usage = blob(protobufFields(summary), 2);
+      return usage && decodeUsage(usage);
+    }),
   };
 }
 
@@ -208,6 +212,7 @@ export async function scanAntigravityDb(store, source, file, sink, stats, option
   const counts = { oversized: 0, malformed: 0, approximateTime: 0, missingId: 0 };
   let rows = 0;
   let decodedRows = 0;
+  let usages = 0;
   let bytes = 0;
   try {
     for (const key of supersededKeys) deleteFileEntry(store, key);
@@ -228,6 +233,7 @@ export async function scanAntigravityDb(store, source, file, sink, stats, option
     else resetFileEntry(store, entry);
     const conversation = antigravityConversation(file);
     const add = (created, model, tokens, dedupKey) => {
+      usages += 1;
       if (created === null) {
         counts.approximateTime += 1;
         created = session.timestamp ?? info.mtimeMs;
@@ -301,13 +307,19 @@ export async function scanAntigravityDb(store, source, file, sink, stats, option
     const checkpoints = [];
     reason = await eachRow(`SELECT step_type, ${limited("metadata")} AS data FROM steps WHERE metadata IS NOT NULL ORDER BY idx`, (record) => {
       let step;
-      try { step = decodeStep(record.data, record.step_type); } catch { counts.malformed += 1; return; }
+      const malformed = () => { counts.malformed += 1; };
+      try { step = decodeStep(record.data, record.step_type, malformed); } catch { malformed(); return; }
       if (!step) return;
       addStepUsage(step.direct, step.created);
       if (step.checkpoint) checkpoints.push(step);
     });
     if (reason) return interrupted(reason);
     for (const step of checkpoints) addStepUsage(step.checkpoint, step.created);
+    if (usages === 0 && (counts.malformed || counts.oversized)) {
+      rollbackStoreTransaction(tx);
+      sink.warn(`Antigravity ${path.basename(file)}: no usable records and some were skipped; previous accepted data retained.`);
+      return { dirty: false, aborted: false };
+    }
     db.exec("COMMIT");
     const warnings = [];
     const notes = [];
