@@ -53,7 +53,7 @@ function providerChecks(row, act, t) {
   const color = row.dim ? t.dim : t.foreground;
   const panel = { on: row.inPanel, onToggle: () => act.togglePanel(p.id) };
   const onToggle = row.kind === "spend" ? () => act.toggleSpendBar(p.id) : () => act.toggleProvider(p.id);
-  const head = check({ id: `p-${p.id}`, on: row.on, label: [providerIcon(p.id, p.icon, color), text(p.name, color)], onToggle, extra: row.reason, panel }, t);
+  const head = check({ id: `p-${p.id}`, on: row.on, label: [providerIcon(p.id, p.name, color), text(p.name, color)], onToggle, extra: row.reason, panel }, t);
   const windows = row.windows.map((w) => check({
     id: `w-${p.id}-${w.id}`, on: w.on, label: [text(w.long, row.on ? t.muted : t.dim)], onToggle: () => act.toggleWindow(p.id, w.id), indent: WINDOW_INDENT,
   }, t));
@@ -93,6 +93,7 @@ export function settingsPanel(canGoBack, states, panel, fable) {
     .child(rule(t))
     .child(check({ id: "opt-reset-time", on: prefs.showResetTime, label: [text("Always show time to reset", t.foreground)], onToggle: act.toggleResetTime }, t))
     .child(check({ id: "opt-bars", on: prefs.showBars, label: [text("Show bars", t.foreground)], onToggle: act.toggleBars }, t))
+    .child(check({ id: "opt-name-on-hover", on: prefs.nameOnHover, label: [text("Provider name on hover", t.foreground)], onToggle: act.toggleNameOnHover }, t))
     .child(rule(t))
     .child(sessionChecks(prefs, act, t))
     .child(div().text_size(10.5).text_color(t.dim).child(DATA_NOTE));
