@@ -156,7 +156,11 @@ const showsNumbers = (layout) => layout.groups?.some((host) =>
   host.groups.some((g) => g.segments.length > 0 || g.spend != null)) === true;
 
 const METER_NAME_CHARS = 12;
-const shortName = (name) => (name.length > METER_NAME_CHARS ? `${name.slice(0, METER_NAME_CHARS - 1)}…` : name);
+// Cuts the middle, as machine names often differ only at the end, and never inside a character.
+const shortName = (name) => {
+  const chars = [...name];
+  return chars.length > METER_NAME_CHARS ? `${chars.slice(0, 6).join("")}…${chars.slice(-5).join("")}` : name;
+};
 const meterWidth = ({ label, segments }, density) => pillWidth(segments, density) + (label == null ? 0 : labelWidth(label));
 
 // Meters take only the width the quota layout leaves over, so a reading never changes that layout.

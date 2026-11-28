@@ -1203,7 +1203,8 @@ test("with two machines each meter is labelled with its machine's short name", (
   for (const [localName, label, expected] of [
     ["studio", "arch-box", ["studio", "arch-box"]],
     [null, "twelve-chars", ["Local", "twelve-chars"]],
-    ["mateos-macbook-pro", "thirteen-char", ["mateos-macb…", "thirteen-ch…"]],
+    ["mateos-macbook-pro", "mateos-macbook-air", ["mateos…k-pro", "mateos…k-air"]],
+    ["abcde🖥fghijkl", "thirteen-char", ["abcde🖥…hijkl", "thirte…-char"]],
   ]) {
     const pills = metersOf(fleetBar(namedModels(localName, label), 3000, [], true));
     assert.deepEqual(pills.map(machineLabel), expected);
