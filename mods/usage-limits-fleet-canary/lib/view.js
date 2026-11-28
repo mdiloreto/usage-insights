@@ -193,8 +193,10 @@ export function barModel(states, prefs, now, providers = PROVIDERS) {
   return { groups, empty: groups.length === 0 };
 }
 
-// A provider frame: its icon (14), padding and border (14) and the space to the next one (8).
-const GROUP_W = 36;
+// A frame: padding and border (14) and the space to the next one (8).
+const FRAME_W = 22;
+// A provider frame adds its icon (14).
+const GROUP_W = FRAME_W + 14;
 // The text tag beside a shared glyph.
 const ICON_TAG_W = 11;
 const CHAR_W = 7;
@@ -214,8 +216,12 @@ function segmentWidth(s, density) {
   return density === DENSITY.NO_BARS ? label + text : label + SEGMENT_BAR_W + text;
 }
 
+const segmentsWidth = (segments, density) => segments.reduce((a, s) => a + segmentWidth(s, density), 0);
+
 export const groupWidth = (g, density) => GROUP_W + (PROVIDER_ICONS[g.providerId]?.tag ? ICON_TAG_W : 0)
-  + (g.spend != null ? spendWidth(g) : 0) + g.segments.reduce((a, s) => a + segmentWidth(s, density), 0);
+  + (g.spend != null ? spendWidth(g) : 0) + segmentsWidth(g.segments, density);
+
+export const pillWidth = (segments, density) => FRAME_W + segmentsWidth(segments, density);
 
 export function chooseDensity(model, widthPx, showBars = true) {
   const steps = showBars ? [DENSITY.FULL, DENSITY.NO_BARS, DENSITY.NO_LABELS, DENSITY.BRIEF] : [DENSITY.NO_BARS, DENSITY.NO_LABELS, DENSITY.BRIEF];

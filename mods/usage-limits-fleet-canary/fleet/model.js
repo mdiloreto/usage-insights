@@ -1,9 +1,10 @@
 import { ago } from "../lib/format.js";
 import { effectivePrefs, isShown } from "../lib/prefs.js";
 import { errorReport } from "../lib/report.js";
-import { DENSITY, NO_READING, barModel, cardModel, groupWidth, isStale, sessionNumbersWidth, tightest } from "../lib/view.js";
+import { DENSITY, NO_READING, barModel, cardModel, groupWidth, isStale, pillWidth, sessionNumbersWidth, tightest } from "../lib/view.js";
 import { PROVIDERS, REMOTE_PROVIDERS } from "../providers/index.js";
 import { THIS_COMPUTER, chipText } from "./identity.js";
+import { resourcePills } from "./resources.js";
 
 const NO_IDENTITY = { localOs: null, localName: null, remoteOs: () => null };
 // Not a valid route (routes start with a letter or digit), so it can share the collapsed list with them.
@@ -106,16 +107,18 @@ export function fleetModels(projection, prefs, selection, localSource, identity 
   const now = projection.now;
   const collapsed = new Set(selection.collapsed);
   const remotePrefs = effectivePrefs({ showResetTime: prefs.showResetTime, hiddenWindows: prefs.hiddenWindows.filter(isFablePreference) });
+  const pills = resourcePills(localSource.resources, localSource.now);
+  const withResources = (host) => (pills.has(host.route) ? { ...host, resources: pills.get(host.route) } : host);
   const forRemote = (machine) => {
     const { route, label } = machine;
     const providers = providersFor(machine);
     const states = remoteStates(machine, now, remotePrefs, providers);
     const groups = compactGroups(states, providers, remotePrefs, now);
-    return {
+    return withResources({
       route, label, chip: chipText(identity.remoteOs(route), label), machine, groups, summary: tightSummary(groups), collapsed: collapsed.has(route),
       panel: providerDetails(states, providers, remotePrefs, now, true),
       fable: states.claude.fable,
-    };
+    });
   };
   const states = localSource.local ?? {};
   const localFable = currentWindows(states.claude, localSource.now).find(isFable);
@@ -124,9 +127,9 @@ export function fleetModels(projection, prefs, selection, localSource, identity 
   } } : states;
   const providers = localProviders(states);
   const localGroups = compactGroups(states, providers, prefs, localSource.now);
-  const local = { route: null, label: THIS_COMPUTER, chip: identity.localName ? chipText(identity.localOs, identity.localName) : THIS_COMPUTER, groups: localGroups, summary: tightSummary(localGroups),
+  const local = withResources({ route: null, label: THIS_COMPUTER, chip: identity.localName ? chipText(identity.localOs, identity.localName) : THIS_COMPUTER, groups: localGroups, summary: tightSummary(localGroups),
     collapsed: collapsed.has(LOCAL_COLLAPSE_KEY),
-    panel: providerDetails(localDetails, providers, prefs, localSource.now, false), fable: localFable };
+    panel: providerDetails(localDetails, providers, prefs, localSource.now, false), fable: localFable });
   const remotes = machines.map(forRemote);
   const groupFor = (machine) => remotes.find(({ route }) => route === machine.route) ?? forRemote(machine);
   const groups = mode === "combined"
@@ -144,8 +147,9 @@ const labelWidth = (label) => Math.ceil(7.5 * label.length + 8);
 export const hostChip = (host) => host.chip ?? host.label;
 // Between two machines: the 1px divider and the gap on each side of it.
 const HOST_GAP_W = 17;
-const hostWidth = (host, density) => labelWidth(hostChip(host)) + host.groups.reduce((sum, g) =>
-  sum + groupWidth(g, density) + (g.mark == null ? 0 : 16), 0);
+const hostWidth = (host, density, resourceDensity) => labelWidth(hostChip(host))
+  + (host.resources ? pillWidth(host.resources, resourceDensity) : 0) + host.groups.reduce((sum, g) =>
+    sum + groupWidth(g, density) + (g.mark == null ? 0 : 16), 0);
 
 const showsNumbers = (layout) => layout.groups?.some((host) =>
   host.groups.some((g) => g.segments.length > 0 || g.spend != null)) === true;
@@ -162,11 +166,19 @@ function barLayout(groups, width, numbers, showBars) {
   if (!groups.some((host) => host.route === null)) numbers = [];
   const sessionWidth = sessionNumbersWidth(numbers);
   const room = width - 24 - sessionWidth - 28;
-  const fits = (hosts, density) => hosts.reduce((sum, host) => sum + hostWidth(host, density), HOST_GAP_W * (hosts.length - 1)) <= room;
+  const fits = (hosts, density, resourceDensity = density) => hosts.reduce((sum, host) =>
+    sum + hostWidth(host, density, resourceDensity), HOST_GAP_W * (hosts.length - 1)) <= room;
   if (showBars && fits(groups, DENSITY.FULL)) return { groups, density: DENSITY.FULL, numbers };
   if (fits(groups, DENSITY.NO_BARS)) return { groups, density: DENSITY.NO_BARS, numbers };
   const tight = groups.map((host) => ({ ...host, groups: host.groups.map(tightGroup) }));
   if (fits(tight, DENSITY.NO_BARS)) return { groups: tight, density: DENSITY.NO_BARS, numbers };
+  // Resources give way before quotas do: first their labels, then the bar is laid out as if there were none.
+  if (fits(tight, DENSITY.NO_BARS, DENSITY.NO_LABELS)) {
+    return { groups: tight, density: DENSITY.NO_BARS, resourceDensity: DENSITY.NO_LABELS, numbers };
+  }
+  if (groups.some((host) => host.resources)) {
+    return barLayout(groups.map(({ resources, ...host }) => host), width, numbers, showBars);
+  }
 
   const padding = width >= 250 ? 12 : width >= 96 ? 4 : 0;
   const labels = groups.map(hostChip);

@@ -23,15 +23,25 @@ function spendSegment(today, t) {
     .child(div().whitespace_nowrap().text_color(t.foreground).child(today));
 }
 
+function frame(id, density, t) {
+  return h_flex().id(id).gap(density === DENSITY.FULL ? 10 : 8).items_center().flex_none()
+    .h(20).px(6).rounded(5).border(1).border_color(t.border).bg(t.raised);
+}
+
 export function providerGroup(g, density, t, prefix = "ul", nameOnHover = false) {
-  return h_flex().id(`${prefix}-${g.providerId}`).gap(density === DENSITY.FULL ? 10 : 8).items_center().flex_none()
-    .h(20).px(6).rounded(5).border(1).border_color(t.border).bg(t.raised)
+  return frame(`${prefix}-${g.providerId}`, density, t)
     .opacity(g.dim ? DIMMED : 1)
     .when(nameOnHover, (e) => e.tooltip(g.name))
     .child(providerIcon(g.providerId, g.name, t.foreground))
     .when(g.mark != null, (e) => e.child(div().text_color(t.dim).child(g.mark)))
     .children(g.segments.map((s) => segment(s, density, t)))
     .when(g.spend != null, (e) => e.child(spendSegment(g.spend, t)));
+}
+
+function resourcePill(id, segments, density, t, nameOnHover) {
+  return frame(id, density, t)
+    .when(nameOnHover, (e) => e.tooltip(segments.map((s) => `${s.short} ${s.text}`).join(" · ")))
+    .children(segments.map((s) => segment(s, density, t)));
 }
 
 function sessionNumbers(numbers, t) {
@@ -61,7 +71,7 @@ function details(id, name, bar, t) {
 }
 
 function fleetTrigger(bar, t) {
-  const { numbers, groups, density, labels } = bar.fleet;
+  const { numbers, groups, density, resourceDensity = density, labels } = bar.fleet;
   const content = h_flex().id("ul-content").gap(8).items_center().min_w(0).on_hover(bar.onHover);
   if (numbers.length) content.child(sessionNumbers(numbers, t)).child(divider(t));
   if (labels) {
@@ -73,6 +83,7 @@ function fleetTrigger(bar, t) {
     content.child(h_flex().id(`ul-machine-${i}`).gap(8).items_center().flex_none()
       .child(div().text_size(10.5).text_color(t.foreground).font_semibold().flex_none().whitespace_nowrap()
         .px(5).child(hostChip(host)))
+      .when(host.resources != null, (e) => e.child(resourcePill(`ul-resources-${i}`, host.resources, resourceDensity, t, bar.nameOnHover)))
       .children(host.groups.map((g) => providerGroup(g, density, t, `ul-fleet-provider-${i}`, bar.nameOnHover))));
   });
   return content.child(details("all", null, bar, t));
