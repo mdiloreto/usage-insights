@@ -1067,11 +1067,14 @@ test("a malformed or stale resource entry is skipped without costing the others"
   const good = reading("arch", 1, 2, 3);
   const bad = [null, undefined, 5, "arch", [], {}, { ...good, route: undefined }, { ...good, route: "" },
     { ...good, route: 4 }, { ...good, route: "mini", observedAt: undefined }, { ...good, route: "mini", observedAt: String(NOW) },
-    { ...good, route: "mini", observedAt: NOW - 61 }];
+    { ...good, route: "mini", observedAt: NOW - 61 }, { ...good, route: "mini", observedAt: NOW + 1 },
+    { ...good, route: "mini", observedAt: NOW + 365 * DAY }, { ...good, route: "mini", observedAt: (NOW - 5) * 1000 }];
   for (const entry of bad) {
     assert.deepEqual(Object.keys(parsed(published(entry, reading(null, 4, 5, 6)))), ["null"], JSON.stringify(entry));
   }
-  assert.equal(resourcePills(published(reading("arch", 1, 2, 3, NOW - 60)), NOW).size, 1, "as old as the limit is still current");
+  for (const observedAt of [NOW, NOW - 60]) {
+    assert.equal(resourcePills(published(reading("arch", 1, 2, 3, observedAt)), NOW).size, 1, `current at ${NOW - observedAt} s old`);
+  }
 });
 
 test("unknown and out-of-range metrics keep their place as a dash, and a machine with none has no pill", () => {
@@ -1141,18 +1144,19 @@ test("resource bars and numbers turn from ok to warn to hot", () => {
   assert.deepEqual(colors, [["ansi2", "ansi2", 21], ["ansi3", "ansi3", 21], ["ansi1", "ansi1", 27]]);
 });
 
-test("the resource pill names its numbers on hover, following the provider-name preference", () => {
+test("the resource pill always names its numbers on hover, whatever the provider-name preference", () => {
   const fleet = fleetBar(resourceModels(published(reading(null, 12, null, 27))), 2400, [], true);
-  const tip = (nameOnHover) => called(stub.findById(drawBar({ fleet, nameOnHover }), "ul-resources-0"), "tooltip")?.[0];
-  assert.equal(tip(true), "CPU 12% · RAM — · Disk 27%");
-  assert.equal(tip(false), undefined);
+  for (const nameOnHover of [true, false]) {
+    const pill = stub.findById(drawBar({ fleet, nameOnHover }), "ul-resources-0");
+    assert.equal(called(pill, "tooltip")?.[0], "CPU 12% · RAM — · Disk 27%", `nameOnHover ${nameOnHover}`);
+  }
 });
 
 test("a numbers-only pill shows an unknown metric as a dim dash in its own place", () => {
   const models = resourceModels(published(reading(null, null, 86, 38)));
   const widths = Array.from({ length: 1500 }, (_, i) => 3000 - 2 * i);
   const fleet = widths.map((width) => fleetBar(models, width, [], true)).find((f) => f.resourceDensity === DENSITY.NO_LABELS);
-  const pill = stub.findById(drawBar({ fleet, nameOnHover: true }), "ul-resources-0");
+  const pill = stub.findById(drawBar({ fleet, nameOnHover: false }), "ul-resources-0");
   assert.deepEqual(pill.kids.map((segmentNode) => [segmentNode.kids.length, stub.textOf(segmentNode),
     called(segmentNode.kids[0], "text_color")[0]]), [[1, "—", "dim"], [1, "86%", "ansi3"], [1, "38%", "ansi2"]]);
   assert.equal(called(pill, "tooltip")[0], "CPU — · RAM 86% · Disk 38%");

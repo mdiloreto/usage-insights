@@ -38,9 +38,9 @@ export function providerGroup(g, density, t, prefix = "ul", nameOnHover = false)
     .when(g.spend != null, (e) => e.child(spendSegment(g.spend, t)));
 }
 
-function resourcePill(id, segments, density, t, nameOnHover) {
+function resourcePill(id, segments, density, t) {
   return frame(id, density, t)
-    .when(nameOnHover, (e) => e.tooltip(segments.map((s) => `${s.short} ${s.text}`).join(" · ")))
+    .tooltip(segments.map((s) => `${s.short} ${s.text}`).join(" · "))
     .children(segments.map((s) => segment(s, density, t)));
 }
 
@@ -83,7 +83,7 @@ function fleetTrigger(bar, t) {
     content.child(h_flex().id(`ul-machine-${i}`).gap(8).items_center().flex_none()
       .child(div().text_size(10.5).text_color(t.foreground).font_semibold().flex_none().whitespace_nowrap()
         .px(5).child(hostChip(host)))
-      .when(host.resources != null, (e) => e.child(resourcePill(`ul-resources-${i}`, host.resources, resourceDensity, t, bar.nameOnHover)))
+      .when(host.resources != null, (e) => e.child(resourcePill(`ul-resources-${i}`, host.resources, resourceDensity, t)))
       .children(host.groups.map((g) => providerGroup(g, density, t, `ul-fleet-provider-${i}`, bar.nameOnHover))));
   });
   return content.child(details("all", null, bar, t));

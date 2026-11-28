@@ -25,7 +25,9 @@ export function resourcePills(record, now) {
   const { version, staleAfterSec, machines } = record ?? {};
   if (version !== 1 || !Number.isInteger(staleAfterSec) || !Array.isArray(machines)) return pills;
   for (const entry of machines) {
-    if (!isRoute(entry?.route) || !Number.isFinite(entry.observedAt) || now - entry.observedAt > staleAfterSec) continue;
+    if (!isRoute(entry?.route) || !Number.isFinite(entry.observedAt)) continue;
+    const age = now - entry.observedAt;
+    if (age < 0 || age > staleAfterSec) continue;
     const segments = pillSegments(entry);
     if (segments.length) pills.set(entry.route, segments);
   }

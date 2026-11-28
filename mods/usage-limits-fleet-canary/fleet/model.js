@@ -168,11 +168,13 @@ function barLayout(groups, width, numbers, showBars) {
   const room = width - 24 - sessionWidth - 28;
   const fits = (hosts, density, resourceDensity = density) => hosts.reduce((sum, host) =>
     sum + hostWidth(host, density, resourceDensity), HOST_GAP_W * (hosts.length - 1)) <= room;
+  // Quotas and resources drop usage bars together, then quotas keep only the tightest window, and only then
+  // do resources lose their labels. When even that is too wide, the layout runs again without resources, so
+  // the room they free goes back to the quotas: a pill that cannot be shown costs them nothing.
   if (showBars && fits(groups, DENSITY.FULL)) return { groups, density: DENSITY.FULL, numbers };
   if (fits(groups, DENSITY.NO_BARS)) return { groups, density: DENSITY.NO_BARS, numbers };
   const tight = groups.map((host) => ({ ...host, groups: host.groups.map(tightGroup) }));
   if (fits(tight, DENSITY.NO_BARS)) return { groups: tight, density: DENSITY.NO_BARS, numbers };
-  // Resources give way before quotas do: first their labels, then the bar is laid out as if there were none.
   if (fits(tight, DENSITY.NO_BARS, DENSITY.NO_LABELS)) {
     return { groups: tight, density: DENSITY.NO_BARS, resourceDensity: DENSITY.NO_LABELS, numbers };
   }
