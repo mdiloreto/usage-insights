@@ -1,20 +1,30 @@
 import { div, image, svg } from "gpui-kit";
-import { ALL_PROVIDERS } from "../providers/index.js";
 import { MOD } from "../lib/mod.js";
+import { PROVIDER_ICONS } from "./icons.js";
 
 export const NO_READING = "—";
 export const SESSION_TITLE = "This session";
 export const DIMMED = 0.55;
 export const LEFT_COLUMN_W = 48;
 export const PERCENT_COLUMN_W = 36;
-const ICON_SIZE = 13;
+const ICON_SIZE = 14;
 
 export const modIcon = (name) => `mods/${MOD}/icons/${name}.svg`;
 
-const ONE_COLOR_GLYPHS = new Set(ALL_PROVIDERS.filter((p) => p.oneColorGlyph).map((p) => p.id));
+const initials = (name) => name.split(/[\s_-]+/).filter(Boolean).slice(0, 2).map((word) => word[0].toUpperCase()).join("");
 
-export function providerIcon(id, path, color) {
-  return ONE_COLOR_GLYPHS.has(id) ? svg(path).size(ICON_SIZE).text_color(color) : image(path).size(ICON_SIZE);
+function monogram(text, color) {
+  return div().h(ICON_SIZE).min_w(ICON_SIZE).px(1).flex().flex_none().items_center().justify_center()
+    .rounded(3).border(1).border_color(color).text_size(8).text_color(color).child(text);
+}
+
+export function providerIcon(id, name, color) {
+  const icon = Object.hasOwn(PROVIDER_ICONS, id) ? PROVIDER_ICONS[id] : null;
+  if (!icon) return monogram(initials(name || id), color);
+  const glyph = icon.oneColor ? svg(icon.path).size(ICON_SIZE).text_color(color) : image(icon.path).size(ICON_SIZE);
+  if (!icon.tag) return glyph;
+  return div().flex().flex_none().items_center().gap(1).child(glyph)
+    .child(div().text_size(8.5).text_color(color).child(icon.tag));
 }
 
 export function levelColor(level, t) {

@@ -9,9 +9,13 @@ import { fileURLToPath } from "node:url";
 import { parseHostRecord } from "../scripts/quota/host.mjs";
 
 const stubUrl = new URL("./helpers/gpui-stub.mjs", import.meta.url).href;
+const herdrUrl = `data:text/javascript,${encodeURIComponent(`const store = new Map();
+export const shared = (key) => store.get(key);
+export const setShared = (key, value) => store.set(key, value);`)}`;
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier === "gpui-kit" || specifier === "gpui-base") return { url: stubUrl, shortCircuit: true };
+    if (specifier === "herdr") return { url: herdrUrl, shortCircuit: true };
     return next(specifier, context);
   },
 });
@@ -23,7 +27,7 @@ const { FLEET_PREFS_KEY, fleetAdapter, sharedFleetPrefs } = await import(`${root
 const { LOCAL_COLLAPSE_KEY } = await import(`${root}/fleet/model.js`);
 const { VERSION } = await import(`${root}/fleet-quota/protocol.mjs`);
 const { effectivePrefs } = await import(`${root}/lib/prefs.js`);
-const { DENSITY } = await import(`${root}/lib/view.js`);
+const { DENSITY, barModel: buildBarModel, groupWidth, segmentView } = await import(`${root}/lib/view.js`);
 const { fleetBar } = await import(`${root}/fleet/model.js`);
 const { ALL_PROVIDERS, PROVIDERS } = await import(`${root}/providers/index.js`);
 const { default: agy } = await import(`${root}/providers/agy.js`);
@@ -32,6 +36,10 @@ const { barModel } = await import(`${root}/lib/view.js`);
 const { limitsPanel } = await import(`${root}/ui/panel.js`);
 const { statusBar } = await import(`${root}/ui/bar.js`);
 const { providerIcon } = await import(`${root}/ui/kit.js`);
+const { settingsPanel } = await import(`${root}/ui/settings.js`);
+const { KEY_PREFS, viewActions } = await import(`${root}/actions.js`);
+const { shared } = await import("herdr");
+const { createIdentity, cleanName, osFromUname } = await import(`${root}/fleet/identity.js`);
 
 const NOW = 1_800_000_000;
 const MIN = 60;
@@ -120,16 +128,91 @@ test("copilot and antigravity appear only for machines that report them", () => 
 test("with no remote machines the model is absent, and an unanswered Antigravity stays out of the local host", () => {
   const { model } = harness(project());
   assert.equal(model(), null);
-  assert.deepEqual(PROVIDERS.map((p) => p.id), ["claude", "codex", "agy", "opencode", "pi"]);
+  assert.deepEqual(PROVIDERS.map((p) => p.id), ["claude", "codex", "agy", "opencode-go", "opencode", "pi"]);
   assert.equal(new Set(ALL_PROVIDERS.map((p) => p.id)).size, ALL_PROVIDERS.length, "no provider is listed twice");
   const local = harness(project(linuxHost())).model(null).local;
-  assert.deepEqual(local.groups.map((g) => g.providerId), ["claude", "codex"]);
+  assert.deepEqual(local.groups.map((g) => g.providerId), ["claude", "codex", "opencode-go"]);
 });
 
-test("copilot is drawn as a one-color glyph and antigravity as a full-color image", () => {
-  assert.equal(providerIcon("copilot", "icons/copilot.svg", "#fff").__node.type, "svg");
-  assert.equal(providerIcon("agy", "icons/antigravity.svg", "#fff").__node.type, "image");
-  assert.equal(providerIcon("claude", "icons/claude.svg", "#fff").__node.type, "image");
+const called = (node, method) => node.calls.find(([name]) => name === method)?.[1];
+const mutedTexts = (tree) => stub.findAll(tree, (n) => called(n, "text_color")?.[0] === "muted").map(stub.textOf);
+
+test("each known provider has a Herdr App icon, tinted only when it is one color", () => {
+  for (const [id, type, path] of [["claude", "image", "claude"], ["codex", "image", "codex"], ["copilot", "svg", "copilot"],
+    ["agy", "image", "antigravity"], ["opencode", "svg", "opencode"], ["pi", "svg", "pi"]]) {
+    const node = stub.nodeOf(providerIcon(id, "Any name", "#fff"));
+    assert.equal(node.type, type, id);
+    assert.deepEqual(called(node, "asset"), [`icons/${path}.svg`], id);
+    assert.deepEqual(called(node, "size"), [14], id);
+    assert.deepEqual(called(node, "text_color"), type === "svg" ? ["#fff"] : undefined, id);
+  }
+});
+
+test("an unknown provider gets a boxed monogram of its initials", () => {
+  for (const [id, name, text] of [["made-up", "Made Up", "MU"], ["made-up", undefined, "MU"],
+    ["gemini", "Gemini", "G"], ["a_b_c", "", "AB"], ["constructor", undefined, "C"]]) {
+    const node = stub.nodeOf(providerIcon(id, name, "#fff"));
+    assert.equal(stub.textOf(node), text, id);
+    assert.deepEqual(stub.assets(node), [], id);
+    for (const [method, value] of [["h", 14], ["min_w", 14], ["border", 1], ["border_color", "#fff"], ["text_color", "#fff"]]) {
+      assert.deepEqual(called(node, method), [value], `${id} ${method}`);
+    }
+  }
+});
+
+test("OpenCode Go is the OpenCode glyph with a tag, so it differs from OpenCode", () => {
+  const plain = stub.nodeOf(providerIcon("opencode", "OpenCode", "#fff"));
+  const go = stub.nodeOf(providerIcon("opencode-go", "OpenCode Go", "#fff"));
+  assert.equal(stub.textOf(plain).trim(), "");
+  assert.equal(stub.textOf(go).trim(), "Go");
+  const [glyph, tag] = go.kids;
+  assert.equal(glyph.type, "svg");
+  assert.deepEqual(stub.assets(go), stub.assets(plain));
+  assert.deepEqual(called(glyph, "text_color"), ["#fff"]);
+  assert.deepEqual(called(tag, "text_color"), ["#fff"]);
+  assert.ok(called(go, "gap")[0] <= 2);
+});
+
+const goWindows = [win("session", "5h", "5-hour", 4, NOW + 3600, 18000), win("weekly", "wk", "Weekly", 100, NOW + 3 * DAY, 604800),
+  win("monthly", "mo", "Monthly", 8, NOW + 10 * DAY, null)];
+const barGroup = (providerId, name, windows) => ({ providerId, name, mark: null, dim: false,
+  segments: windows.map((w) => segmentView(w, NOW)) });
+
+test("a frame with the OpenCode Go tag is estimated wider than the same one without it", () => {
+  const go = barGroup("opencode-go", "OpenCode Go", goWindows);
+  for (const density of Object.values(DENSITY)) {
+    assert.ok(groupWidth(go, density) > groupWidth({ ...go, providerId: "opencode" }, density), `density ${density}`);
+  }
+});
+
+test("a second machine holding one provider keeps its chip right before it at every width", () => {
+  const remote = linuxHost();
+  remote.providers[3] = item("agy", { current: current("host", NOW - MIN, goWindows.slice(0, 2)) });
+  const [arch] = harness(project(remote)).model().remotes;
+  const first = { ...arch, chip: "Mac · mini", groups: arch.groups.filter((g) => g.providerId !== "agy") };
+  const second = { ...arch, chip: "Linux · mateod-arch", groups: [group(arch, "agy")] };
+  const stages = new Set();
+  for (let width = 60; width <= 1600; width += 4) {
+    const fleet = fleetBar({ groups: [first, second] }, width, [], true);
+    const tree = drawBar({ fleet });
+    if (fleet.labels) {
+      stages.add("labels");
+      assert.deepEqual(fleet.labels, [first.chip, second.chip]);
+      assert.equal(framesOf(tree, "ul-fleet-provider-").length, 0);
+      continue;
+    }
+    stages.add(`${fleet.density}-${fleet.groups[0].groups[0].segments.length}`);
+    const [, separator, machine] = stub.findById(tree, "ul-content").kids;
+    assert.deepEqual([called(separator, "w"), called(separator, "h")], [[1], [14]], `width ${width}`);
+    assert.equal(machine.id, "ul-machine-1");
+    const [chip, frame, ...rest] = machine.kids;
+    assert.equal(stub.textOf(chip), second.chip, `width ${width}`);
+    assert.equal(called(chip, "border"), undefined, "a machine label is not framed like a provider");
+    assert.equal(frame.id, "ul-fleet-provider-1-agy");
+    assert.equal(rest.length, 0);
+    assert.match(stub.textOf(frame), /\d+%/);
+  }
+  assert.equal(stages.size, 4);
 });
 
 test("collapsed machines persist per route, keep older records valid and survive other pref writes", () => {
@@ -162,8 +245,8 @@ test("refresh covers all four providers and names them", () => {
   assert.equal(adapter.dispatch({ type: "refresh", route: "arch", provider: "gemini" }).status, "rejected");
 });
 
-function drawPanel(models, { remoteOutcome, onRemoteIntent = () => {} } = {}) {
-  const panel = { t: stub.theme, act: {}, prefs: effectivePrefs(), hovered: null, now: NOW, remoteOutcome,
+function drawPanel(models, { remoteOutcome, onRemoteIntent = () => {}, prefs = effectivePrefs(), t = stub.theme } = {}) {
+  const panel = { t, act: {}, prefs, hovered: null, now: NOW, remoteOutcome,
     onRemoteIntent, canRefreshLocal: () => false, refreshLocal() {} };
   return stub.nodeOf(limitsPanel(models.local.panel, null, panel, models));
 }
@@ -205,47 +288,177 @@ test("This Computer collapses too and still lists its compact quotas", () => {
   assert.ok(stub.findById(tree, "ul-remote-refresh-arch-copilot"), "remote machines are unaffected");
 });
 
+test("every collapsed summary labels its window, however long the row", () => {
+  const remote = linuxHost();
+  remote.providers[3] = item("agy", { current: current("host", NOW - MIN, goWindows.slice(0, 2)) });
+  const { adapter, model } = harness(project(remote));
+  adapter.dispatch({ type: "collapse", key: "arch" });
+  const tree = drawPanel(model());
+  for (const [id, short] of [["claude", "wk"], ["codex", "5h"], ["copilot", "mo"], ["agy", "wk"]]) {
+    const frame = stub.findById(tree, `ul-sum-arch-${id}`);
+    assert.ok(stub.findAll(frame, (n) => n.texts.includes(short)).length, `${id} ${short}`);
+  }
+});
+
+test("a one-machine bar keeps its numbers down to the width its estimate needs", () => {
+  // Only Claude here and no Antigravity anywhere, so exactly one group can reach the bar.
+  const states = { ...localStates, codex: { installed: false }, "opencode-go": { installed: false } };
+  const remote = linuxHost();
+  remote.providers = remote.providers.slice(0, 2);
+  const models = harness(project(remote)).adapter.model(project(remote), null, effectivePrefs(), { local: states, now: NOW });
+  assert.deepEqual(models.groups.map((h) => [h.chip, h.groups.map((g) => g.providerId)]), [["This Computer", ["claude"]]]);
+  // Chip 106, frame 36, label 21 and number 22, beside the bar's padding and details button (52).
+  const width = 106 + 36 + 21 + 22 + 52;
+  const fleet = fleetBar(models, width, [], true);
+  assert.equal(fleet.labels, undefined);
+  assert.match(barText(fleet), /5h 4%/);
+  assert.deepEqual(fleetBar(models, width - 1, [], true).labels, ["This Computer"]);
+});
+
+test("eight providers on two machines still show numbers at 1152px", () => {
+  const spend = (today) => ({ report: { status: "ok", observedAt: NOW, windows: [], spend: { today, week: 2 * today } } });
+  const limits = (...windows) => ({ report: { status: "ok", observedAt: NOW, windows } });
+  const local = { claude: limits(win("weekly_all", "wk", "Weekly", 82, NOW + 3 * DAY, 604800)),
+    codex: limits(win("codex:primary", "5h", "5-hour", 20, NOW + 3600, 18000)), opencode: spend(1_200_000), pi: spend(48_000),
+    "opencode-go": { installed: false } };
+  const remote = linuxHost({ label: "t87" });
+  remote.providers[3] = item("agy", { current: current("host", NOW - MIN, goWindows.slice(0, 1)) });
+  const projection = project(remote);
+  const prefs = effectivePrefs({ spendOnBar: { opencode: true, pi: true } });
+  const { adapter } = harness(projection, { mode: "combined", selected: { route: "arch", label: "t87" }, collapsed: [] });
+  const models = adapter.model(projection, null, prefs, { local, now: NOW }, chipsFor("mbp", "Linux"));
+  assert.deepEqual(models.groups.map((h) => [h.chip, h.groups.length]), [["Mac · mbp", 4], ["Linux · t87", 4]]);
+  const fleet = fleetBar(models, 1152, [], true);
+  assert.equal(fleet.labels, undefined);
+  const text = barText(fleet);
+  for (const number of ["82% · 3d 0h", "20%", "1.2M", "48k", "100% · 10d 0h", "4%"]) assert.ok(text.includes(number), number);
+});
+
 test("the refresh outcome names the provider", () => {
   const remoteOutcome = { status: "accepted", route: "arch", label: "mateod-arch", provider: "agy" };
   const text = stub.textOf(drawPanel(harness(project(linuxHost())).model(), { remoteOutcome }));
   assert.ok(text.includes("mateod-arch · Antigravity: Refresh queued"));
 });
 
-test("Follow Space in a remote space shows the machine label and every provider's compact reading", () => {
+test("Follow Space in a remote space shows the machine label and every provider's reading", () => {
   const models = harness(project(linuxHost())).model();
   const fleet = fleetBar(models, 1400, [], true);
   assert.equal(fleet.density, DENSITY.FULL);
-  const bar = { fleet, detailsOpen: null, panel: null, border: false, onResize() {}, onHover() {}, toggleDetails() {} };
-  const text = stub.textOf(stub.nodeOf(statusBar(bar, stub.theme)));
+  const text = stub.textOf(drawBar({ fleet }));
   assert.ok(text.includes("mateod-arch"));
-  for (const name of ["Claude", "Codex", "Copilot", "Antigravity"]) assert.ok(text.includes(name), name);
   assert.match(text, /100%/);
 });
 
-test("the bar drops provider names, keeping icons and segments, before it falls back to labels only", () => {
-  const models = harness(project(linuxHost())).model();
-  const widths = [];
-  for (let width = 100; width <= 1400; width += 2) {
-    const fleet = fleetBar(models, width, [], true);
-    widths.push([width, fleet.labels ? "labels" : fleet.named === false ? "icons" : fleet.groups[0].groups[0].segments.length > 1 ? "full" : "tight"]);
+const NAMES = ["Claude", "Codex", "Copilot", "Antigravity"];
+// Theme colors read as their own names, so a test can tell them apart.
+const namedTheme = new Proxy({}, { get: (_target, key) => key });
+const drawBar = (fields) => stub.nodeOf(statusBar({ detailsOpen: null, panel: null, border: false, onResize() {}, onHover() {},
+  toggleDetails() {}, ...fields }, namedTheme));
+const framesOf = (tree, prefix) => stub.findAll(tree, (n) => typeof n.id === "string" && n.id.startsWith(prefix));
+const localStates = { claude: { report: { status: "ok", observedAt: NOW, windows: [
+  win("session", "5h", "5-hour", 4, NOW + 3600, 18000)] } } };
+const localBar = (density, fields = {}) => drawBar({ model: buildBarModel(localStates, effectivePrefs(), NOW), numbers: [], density, ...fields });
+
+function assertFramed(frame) {
+  for (const [method, value] of [["h", 20], ["px", 6], ["rounded", 5], ["border", 1], ["border_color", "border"], ["bg", "raised"]]) {
+    assert.deepEqual(called(frame, method), [value], `${frame.id} ${method}`);
   }
-  const stages = [...new Set(widths.map(([, stage]) => stage))];
-  assert.deepEqual(stages, ["labels", "icons", "tight", "full"]);
-  const [width] = widths.find(([, stage]) => stage === "icons");
-  const fleet = fleetBar(models, width, [], true);
-  assert.equal(fleet.density, DENSITY.NO_BARS);
-  assert.deepEqual(fleet.groups[0].groups.map((g) => g.providerId), ["claude", "codex", "copilot", "agy"]);
-  assert.ok(fleet.groups[0].groups.every((g) => g.segments.length <= 1));
-  const bar = { fleet, detailsOpen: null, panel: null, border: false, onResize() {}, onHover() {}, toggleDetails() {} };
-  const text = stub.textOf(stub.nodeOf(statusBar(bar, stub.theme)));
-  assert.ok(text.includes("mateod-arch") && /100%/.test(text));
-  for (const name of ["Claude", "Codex", "Copilot", "Antigravity"]) assert.ok(!text.includes(name), name);
+  for (const name of NAMES) assert.ok(!stub.textOf(frame).includes(name), `${frame.id} ${name}`);
+}
+
+test("each provider group is a frame led by its icon, with no name text, in both bars and the summaries", () => {
+  const { adapter, model } = harness(project(linuxHost()));
+  const fleet = framesOf(drawBar({ fleet: fleetBar(model(), 1400, [], true) }), "ul-fleet-provider-0-");
+  assert.equal(fleet.length, 4);
+  const local = framesOf(localBar(DENSITY.FULL), "ul-claude");
+  assert.equal(local.length, 1);
+  adapter.dispatch({ type: "collapse", key: "arch" });
+  const summary = framesOf(drawPanel(model(), { t: namedTheme }), "ul-sum-arch-");
+  assert.equal(summary.length, 4);
+  const groups = [barGroup("agy", "Antigravity", goWindows), barGroup("opencode-go", "OpenCode Go", goWindows)];
+  const tree = drawBar({ model: { groups, empty: false }, numbers: [], density: DENSITY.FULL });
+  const added = groups.map((g) => stub.findById(tree, `ul-${g.providerId}`));
+  for (const frame of added) {
+    for (const text of ["5h", "wk", "mo", "4%", "100%", "8%"]) assert.ok(stub.textOf(frame).includes(text), `${frame.id} ${text}`);
+    assert.ok(!stub.textOf(frame).includes("OpenCode"), frame.id);
+  }
+  for (const frame of [...fleet, ...local, ...summary, ...added]) {
+    assertFramed(frame);
+    assert.equal(stub.assets(frame.kids[0]).length, 1, frame.id);
+  }
 });
 
-const { createIdentity, cleanName, osFromUname } = await import(`${root}/fleet/identity.js`);
+test("a stale provider dims its whole frame", () => {
+  const [arch] = harness(project(linuxHost())).model().remotes;
+  const frames = framesOf(drawBar({ fleet: fleetBar({ groups: [{ ...arch, groups: arch.groups.map((g) => ({ ...g, dim: true })) }] }, 1400, [], true) }),
+    "ul-fleet-provider-0-");
+  for (const frame of frames) assert.deepEqual(called(frame, "opacity"), [0.55], frame.id);
+});
 
-const barText = (fleet) => stub.textOf(stub.nodeOf(statusBar({ fleet, detailsOpen: null, panel: null, border: false,
-  onResize() {}, onHover() {}, toggleDetails() {} }, stub.theme)));
+test("the provider name shows on hover in the fleet bar and summaries, never in the local bar", () => {
+  const { adapter, model } = harness(project(linuxHost()));
+  const fleet = fleetBar(model(), 1400, [], true);
+  const tips = (tree, prefix) => framesOf(tree, prefix).map((frame) => called(frame, "tooltip")?.[0]);
+  assert.deepEqual(tips(drawBar({ fleet, nameOnHover: true }), "ul-fleet-provider-0-"), NAMES);
+  assert.deepEqual(tips(drawBar({ fleet, nameOnHover: false }), "ul-fleet-provider-0-"), NAMES.map(() => undefined));
+  assert.deepEqual(tips(localBar(DENSITY.FULL, { nameOnHover: true }), "ul-claude"), [undefined]);
+  adapter.dispatch({ type: "collapse", key: "arch" });
+  assert.deepEqual(tips(drawPanel(model()), "ul-sum-arch-"), NAMES);
+  assert.deepEqual(tips(drawPanel(model(), { prefs: effectivePrefs({ nameOnHover: false }) }), "ul-sum-arch-"), NAMES.map(() => undefined));
+});
+
+test("only frames separate local providers, and a divider separates machines", () => {
+  const dividers = (tree) => stub.findAll(tree, (n) => called(n, "w")?.[0] === 1 && called(n, "h")?.[0] === 14).length;
+  const states = { ...localStates, codex: localStates.claude };
+  const model = buildBarModel(states, effectivePrefs(), NOW);
+  assert.equal(dividers(drawBar({ model, numbers: [], density: DENSITY.FULL })), 0);
+  assert.equal(dividers(drawBar({ model, numbers: [{ level: "ok", text: "12%" }], density: DENSITY.FULL })), 1);
+  assert.equal(dividers(drawBar({ fleet: fleetBar(harness(project(linuxHost())).model(), 1400, [], true) })), 0);
+  assert.equal(dividers(drawBar({ fleet: fleetBar(combinedModel(), 2400, [], true) })), 1);
+});
+
+test("the fleet bar drops usage bars, then all but the tightest window, then falls back to labels only", () => {
+  const models = harness(project(linuxHost())).model();
+  const stageOf = (fleet) => fleet.labels ? "labels" : fleet.density === DENSITY.FULL ? "full"
+    : fleet.groups[0].groups[0].segments.length > 1 ? "compact" : "tight";
+  const widths = [];
+  for (let width = 100; width <= 1400; width += 2) widths.push([width, stageOf(fleetBar(models, width, [], true))]);
+  assert.deepEqual([...new Set(widths.map(([, stage]) => stage))], ["labels", "tight", "compact", "full"]);
+  for (const [stage, shorts] of [["compact", ["5h", "wk", "Fable", "mo"]], ["tight", ["5h", "mo"]]]) {
+    const [width] = widths.find(([, found]) => found === stage);
+    const fleet = fleetBar(models, width, [], true);
+    assert.equal(fleet.density, DENSITY.NO_BARS);
+    assert.deepEqual(fleet.groups[0].groups.map((g) => g.providerId), ["claude", "codex", "copilot", "agy"]);
+    if (stage === "tight") assert.ok(fleet.groups[0].groups.every((g) => g.segments.length <= 1));
+    const tree = drawBar({ fleet });
+    for (const short of shorts) assert.ok(stub.findAll(tree, (n) => n.texts.includes(short)).length, `${stage} ${short}`);
+  }
+});
+
+test("window labels and 'today' are muted, and the narrowest local densities drop the window label", () => {
+  assert.ok(mutedTexts(localBar(DENSITY.NO_BARS)).includes("5h"));
+  assert.ok(!stub.textOf(localBar(DENSITY.NO_LABELS)).includes("5h"));
+  const states = { pi: { report: { status: "ok", observedAt: NOW, windows: [], spend: { today: 1200, week: 5000 } } } };
+  const model = buildBarModel(states, effectivePrefs({ spendOnBar: { pi: true } }), NOW);
+  assert.ok(mutedTexts(drawBar({ model, numbers: [], density: DENSITY.FULL })).includes("today"));
+});
+
+test("the settings checkbox toggles the provider name on hover, on by default", () => {
+  const act = viewActions({ prefs: () => effectivePrefs(shared(KEY_PREFS)) });
+  const click = () => {
+    const prefs = effectivePrefs(shared(KEY_PREFS));
+    const tree = stub.nodeOf(settingsPanel(false, {}, { t: stub.theme, act, prefs }));
+    const box = stub.findById(tree, "opt-name-on-hover");
+    assert.ok(stub.textOf(box).includes("Provider name on hover"));
+    box.handlers.on_click({}, { notify() {} });
+    return effectivePrefs(shared(KEY_PREFS)).nameOnHover;
+  };
+  assert.equal(effectivePrefs().nameOnHover, true);
+  assert.equal(click(), false);
+  assert.equal(click(), true);
+});
+
+const barText = (fleet) => stub.textOf(drawBar({ fleet }));
 const chipsFor = (local, remote) => ({ localOs: "Mac", localName: local, remoteOs: () => remote });
 const combinedModel = (identity) => {
   const projection = project(linuxHost());
@@ -274,13 +487,13 @@ test("the chip is present at every density, including the labels-only fallback",
   const stages = new Set();
   for (let width = 60; width <= 2400; width += 4) {
     const fleet = fleetBar(models, width, [], true);
-    stages.add(fleet.labels ? "labels" : fleet.named === false ? "icons" : "wide");
+    stages.add(fleet.labels ? "labels" : "wide");
     if (fleet.labels) assert.deepEqual(fleet.labels, ["Mac · mateos-macbook-pro", "Linux · mateod-arch"]);
     else assert.deepEqual(fleet.groups.map((h) => h.chip), ["Mac · mateos-macbook-pro", "Linux · mateod-arch"]);
     const text = fleet.labels ? fleet.labels.join(" ") : barText(fleet);
     assert.ok(text.includes("Mac · mateos-macbook-pro") && text.includes("Linux · mateod-arch"), `width ${width}`);
   }
-  assert.ok(stages.has("labels") && stages.has("icons") && stages.has("wide"));
+  assert.ok(stages.has("labels") && stages.has("wide"));
 });
 
 test("chip names are sanitised", () => {
@@ -562,7 +775,8 @@ test("the Antigravity helper exits 127 for a missing file, a symlink or a direct
 const localRecord = (change = {}) => edited({ limitsFetchedAt: (NOW - MIN) * 1000, limits: [
   limit("Session (5-hour)", 0.4, iso(NOW + 3600)), limit("Weekly (7-day)", 0.25, iso(NOW + 3 * DAY)),
 ], ...change });
-const answered = (stdout, code = 0) => ({ agy: fetchedState(NEVER_FETCHED, agy, { code, stdout }, NOW) });
+const answered = (stdout, code = 0) => ({ agy: fetchedState(NEVER_FETCHED, agy, { code, stdout }, NOW),
+  "opencode-go": { installed: false } });
 const NOT_INSTALLED = 127;
 
 function localHost(local) {

@@ -8,7 +8,7 @@ import { hostChip } from "../fleet/model.js";
 const BAR_W = 30;
 const PANEL_OPEN_DELAY_MS = 350;
 
-const label = (text, t) => div().text_size(10.5).text_color(t.dim).child(text);
+const label = (text, t) => div().text_size(10.5).text_color(t.muted).child(text);
 
 function segment(s, density, t) {
   return h_flex().gap(5).items_center().flex_none()
@@ -23,11 +23,12 @@ function spendSegment(today, t) {
     .child(div().whitespace_nowrap().text_color(t.foreground).child(today));
 }
 
-export function providerGroup(g, density, t, prefix = "ul", named = prefix !== "ul") {
+export function providerGroup(g, density, t, prefix = "ul", nameOnHover = false) {
   return h_flex().id(`${prefix}-${g.providerId}`).gap(density === DENSITY.FULL ? 10 : 8).items_center().flex_none()
+    .h(20).px(6).rounded(5).border(1).border_color(t.border).bg(t.raised)
     .opacity(g.dim ? DIMMED : 1)
-    .child(providerIcon(g.providerId, g.icon, t.foreground))
-    .when(named, (e) => e.child(label(g.name, t).whitespace_nowrap()))
+    .when(nameOnHover, (e) => e.tooltip(g.name))
+    .child(providerIcon(g.providerId, g.name, t.foreground))
     .when(g.mark != null, (e) => e.child(div().text_color(t.dim).child(g.mark)))
     .children(g.segments.map((s) => segment(s, density, t)))
     .when(g.spend != null, (e) => e.child(spendSegment(g.spend, t)));
@@ -39,17 +40,13 @@ function sessionNumbers(numbers, t) {
 }
 
 function limitsTrigger({ model, numbers, density, onHover }, t) {
-  const content = h_flex().id("ul-content").gap(14).items_center().flex_none().on_hover(onHover);
+  const content = h_flex().id("ul-content").gap(8).items_center().flex_none().on_hover(onHover);
   if (numbers.length) {
     content.child(sessionNumbers(numbers, t));
     if (!model.empty) content.child(divider(t));
   }
   if (model.empty) content.child(div().id("ul-empty").child(svg(modIcon("gauge")).size(14)));
-  model.groups.forEach((g, i) => {
-    if (i > 0) content.child(divider(t));
-    content.child(providerGroup(g, density, t));
-  });
-  return content;
+  return content.children(model.groups.map((g) => providerGroup(g, density, t)));
 }
 
 function details(id, name, bar, t) {
@@ -64,18 +61,21 @@ function details(id, name, bar, t) {
 }
 
 function fleetTrigger(bar, t) {
-  const { numbers, groups, density, labels, named } = bar.fleet;
+  const { numbers, groups, density, labels } = bar.fleet;
   const content = h_flex().id("ul-content").gap(8).items_center().min_w(0).on_hover(bar.onHover);
   if (numbers.length) content.child(sessionNumbers(numbers, t)).child(divider(t));
   if (labels) {
     return content
       .children(labels.map((name, i) => div().min_w(0).flex_shrink(1).child(details(String(i), name, bar, t))));
   }
-  return content.children(groups.map((host, i) => h_flex().id(`ul-machine-${i}`).gap(8).items_center().flex_none()
-    .child(div().text_size(10.5).text_color(t.foreground).font_semibold().flex_none().whitespace_nowrap()
-      .px(5).py(1).rounded(4).border(1).border_color(t.border).child(hostChip(host)))
-    .children(host.groups.map((g) => providerGroup(g, density, t, `ul-fleet-provider-${i}`, named !== false)))))
-    .child(details("all", null, bar, t));
+  groups.forEach((host, i) => {
+    if (i > 0) content.child(divider(t));
+    content.child(h_flex().id(`ul-machine-${i}`).gap(8).items_center().flex_none()
+      .child(div().text_size(10.5).text_color(t.foreground).font_semibold().flex_none().whitespace_nowrap()
+        .px(5).child(hostChip(host)))
+      .children(host.groups.map((g) => providerGroup(g, density, t, `ul-fleet-provider-${i}`, bar.nameOnHover))));
+  });
+  return content.child(details("all", null, bar, t));
 }
 
 export function statusBar(bar, t) {

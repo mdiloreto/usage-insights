@@ -3,7 +3,7 @@ import { PANEL_CLOSE_DELAY_MS } from "./lib/mod.js";
 import { KEY_BINDINGS } from "./lib/session-binding.js";
 import { closedSinceLeft, hoveredAfter, panelOnEnter } from "./lib/view.js";
 import { spendBarOn } from "./lib/settings.js";
-import { toggleFolded, toggleOnBar, togglePanel, toggleProvider, toggleShowBars, toggleShowResetTime, toggleSpendOnBar, toggleWindow } from "./lib/prefs.js";
+import { toggleFolded, toggleNameOnHover, toggleOnBar, togglePanel, toggleProvider, toggleShowBars, toggleShowResetTime, toggleSpendOnBar, toggleWindow } from "./lib/prefs.js";
 
 export const KEY_STATE = "usage-limits.state";
 export const KEY_PREFS = "usage-limits.prefs";
@@ -102,6 +102,7 @@ function prefsActions(view) {
     toggleSpendBar: (id) => save((p) => toggleSpendOnBar(p, id, spendBarOn(p, states(), id))),
     toggleResetTime: () => save(toggleShowResetTime),
     toggleBars: () => save(toggleShowBars),
+    toggleNameOnHover: () => save(toggleNameOnHover),
     toggleOnBar: (row) => save((p) => toggleOnBar(p, row)),
   };
 }
