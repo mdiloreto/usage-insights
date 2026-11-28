@@ -38,9 +38,12 @@ export function providerGroup(g, density, t, prefix = "ul", nameOnHover = false)
     .when(g.spend != null, (e) => e.child(spendSegment(g.spend, t)));
 }
 
-function resourcePill(id, segments, density, t) {
+const machineName = (t) => div().text_size(10.5).text_color(t.foreground).font_semibold().flex_none().whitespace_nowrap();
+
+function resourcePill(id, { name, label: shortName, segments }, density, t) {
   return frame(id, density, t)
-    .tooltip(segments.map((s) => `${s.short} ${s.text}`).join(" · "))
+    .tooltip([name, ...segments.map((s) => `${s.short} ${s.text}`)].join(" · "))
+    .when(shortName != null, (e) => e.child(machineName(t).child(shortName)))
     .children(segments.map((s) => segment(s, density, t)));
 }
 
@@ -71,22 +74,31 @@ function details(id, name, bar, t) {
 }
 
 function fleetTrigger(bar, t) {
-  const { numbers, groups, density, resourceDensity = density, labels } = bar.fleet;
-  const content = h_flex().id("ul-content").gap(8).items_center().min_w(0).on_hover(bar.onHover);
-  if (numbers.length) content.child(sessionNumbers(numbers, t)).child(divider(t));
+  const { numbers, groups, density, labels, meters = [], meterDensity } = bar.fleet;
+  // The left side gets only the width the right side leaves, so it is the one that clips. A right side wider
+  // than the whole bar stays anchored at the right edge.
+  const left = h_flex().id("ul-left").gap(8).items_center().flex_1().min_w(0).overflow_hidden();
+  if (numbers.length) left.child(sessionNumbers(numbers, t));
+  if (numbers.length && meters.length) left.child(divider(t));
+  left.children(meters.map((meter, i) => resourcePill(`ul-resources-${i}`, meter, meterDensity, t)));
+  const right = h_flex().id("ul-right").gap(8).items_center();
   if (labels) {
-    return content
+    right.min_w(0)
       .children(labels.map((name, i) => div().min_w(0).flex_shrink(1).child(details(String(i), name, bar, t))));
+  } else {
+    right.flex_none();
+    groups.forEach((host, i) => {
+      if (i > 0) right.child(divider(t));
+      right.child(h_flex().id(`ul-machine-${i}`).gap(8).items_center().flex_none()
+        .child(machineName(t).px(5).child(hostChip(host)))
+        .children(host.groups.map((g) => providerGroup(g, density, t, `ul-fleet-provider-${i}`, bar.nameOnHover))));
+    });
+    right.child(details("all", null, bar, t));
   }
-  groups.forEach((host, i) => {
-    if (i > 0) content.child(divider(t));
-    content.child(h_flex().id(`ul-machine-${i}`).gap(8).items_center().flex_none()
-      .child(div().text_size(10.5).text_color(t.foreground).font_semibold().flex_none().whitespace_nowrap()
-        .px(5).child(hostChip(host)))
-      .when(host.resources != null, (e) => e.child(resourcePill(`ul-resources-${i}`, host.resources, resourceDensity, t)))
-      .children(host.groups.map((g) => providerGroup(g, density, t, `ul-fleet-provider-${i}`, bar.nameOnHover))));
-  });
-  return content.child(details("all", null, bar, t));
+  // Attaching an element consumes it, so both sides are complete by now.
+  return h_flex().id("ul-content").items_center().justify_end().w_full().min_w(0).on_hover(bar.onHover)
+    .when(numbers.length > 0 || meters.length > 0, (e) => e.gap(8))
+    .child(left).child(right);
 }
 
 export function statusBar(bar, t) {

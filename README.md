@@ -107,8 +107,8 @@ anything.
 Quota readings are different: they come from the providers, asked with the
 sign-in already on the machine being read. When herdr-glass's
 `fleet-resources` mod publishes `fleet-resources.readings`, the fleet bar also
-shows each machine's CPU, RAM and disk use beside its name, and nothing extra
-otherwise.
+shows each machine's CPU, RAM and disk use at its left end, as far as the room
+beside the quotas allows, and nothing extra otherwise.
 
 - **This computer:** each loaded copy of the bar in
   `mods/usage-limits-fleet-canary`, which `npm run install:local` does not

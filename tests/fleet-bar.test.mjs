@@ -203,7 +203,7 @@ test("a second machine holding one provider keeps its chip right before it at ev
       continue;
     }
     stages.add(`${fleet.density}-${fleet.groups[0].groups[0].segments.length}`);
-    const [, separator, machine] = stub.findById(tree, "ul-content").kids;
+    const [, separator, machine] = stub.findById(tree, "ul-right").kids;
     assert.deepEqual([called(separator, "w"), called(separator, "h")], [[1], [14]], `width ${width}`);
     assert.equal(machine.id, "ul-machine-1");
     const [chip, frame, ...rest] = machine.kids;
@@ -1086,56 +1086,179 @@ test("unknown and out-of-range metrics keep their place as a dash, and a machine
   }
 });
 
-test("Follow Space shows the resources of the focused space's machine, between its chip and its quotas", () => {
-  for (const [focused, id, numbers] of [[null, "claude", /CPU 12% RAM 61% Disk 27%/], ["arch", "claude", /CPU 71% RAM 33% Disk 90%/]]) {
-    const tree = drawBar({ fleet: fleetBar(resourceModels(bothRead, { focused }), 2400, [], true) });
-    assert.equal(pillsOf(tree).length, 1);
-    const [, pill, frame] = stub.findById(tree, "ul-machine-0").kids;
-    assert.equal(pill.id, "ul-resources-0");
-    assert.equal(frame.id, `ul-fleet-provider-0-${id}`);
-    assert.match(stub.textOf(pill).replace(/\s+/g, " "), numbers);
+const session = [{ level: "ok", text: "ctx 12%" }];
+const metersOf = (fleet) => pillsOf(drawBar({ fleet }));
+const idsOf = (node) => node.kids.map((kid) => kid.id);
+const isDivider = (node) => called(node, "w")?.[0] === 1 && called(node, "h")?.[0] === 14;
+const sidesOf = (tree) => {
+  const content = stub.findById(tree, "ul-content");
+  assert.deepEqual(idsOf(content), ["ul-left", "ul-right"]);
+  return content.kids;
+};
+const hasBar = (node) => stub.findAll(node, (n) => called(n, "h")?.[0] === 4).length > 0;
+const pillStyle = (pill) => `${stub.textOf(pill).includes("CPU") ? "label " : ""}${hasBar(pill) ? "bar " : ""}number`;
+// The machine label is the one child of a pill that is plain text; its metrics are rows.
+const machineLabel = (pill) => (pill.kids[0].type === "div" ? stub.textOf(pill.kids[0]) : null);
+const pillTexts = (pill) => stub.textOf(pill).replace(/\s+/g, " ");
+const narrowestWith = (models, shown, showBars = true) => {
+  for (let width = 60; width <= 3000; width += 1) {
+    const fleet = fleetBar(models, width, [], showBars);
+    if (!fleet.labels && shown(fleet)) return width;
+  }
+  return assert.fail("never shown");
+};
+
+test("session numbers and then the meters, in chip order, are on the left, apart from the quotas", () => {
+  const models = combinedResources(published(reading("arch", 71, 33, 90), reading(null, 12, 61, 27)));
+  const fleet = fleetBar(models, 3000, session, true);
+  const tree = drawBar({ fleet });
+  const [left, right] = sidesOf(tree);
+  const [numbers, separator, ...pills] = left.kids;
+  assert.match(stub.textOf(numbers), /ctx 12%/);
+  assert.ok(isDivider(separator));
+  assert.deepEqual(pills.map((p) => p.id), ["ul-resources-0", "ul-resources-1"]);
+  assert.match(pillTexts(pills[0]), /12%.*61%.*27%/);
+  assert.match(pillTexts(pills[1]), /71%.*33%.*90%/);
+  for (const pill of pills) {
     assertFramed(pill);
-    assert.deepEqual(stub.assets(pill), [], "the pill has no icon");
+    assert.deepEqual(stub.assets(pill), [], "a meter has no icon");
+  }
+  assert.equal(pillsOf(right).length, 0);
+  assert.ok(!stub.textOf(right).includes("ctx 12%"));
+  assert.deepEqual(idsOf(right), ["ul-machine-0", undefined, "ul-machine-1", "ul-fleet-all"]);
+  for (const [index, machineNode] of [[0, right.kids[0]], [1, right.kids[2]]]) {
+    const [chip, ...frames] = machineNode.kids;
+    assert.equal(stub.textOf(chip), fleet.groups[index].chip);
+    assert.ok(frames.every((frame) => frame.id.startsWith(`ul-fleet-provider-${index}-`)));
+  }
+});
+
+test("the left side gives way before the right one, and hovering either counts", () => {
+  const onHover = () => {};
+  const models = combinedResources(bothRead);
+  for (const width of [3000, 200]) {
+    const fleet = fleetBar(models, width, session, true);
+    const tree = drawBar({ fleet, onHover });
+    const content = stub.findById(tree, "ul-content");
+    assert.equal(content.handlers.on_hover, onHover);
+    assert.ok(called(content, "w_full"));
+    const [left, right] = sidesOf(tree);
+    assert.ok(called(left, "flex_1") && called(left, "overflow_hidden"), `width ${width}`);
+    assert.deepEqual(called(left, "min_w"), [0]);
+    if (!fleet.labels) {
+      assert.ok(called(right, "flex_none"), `width ${width}`);
+      continue;
+    }
+    assert.deepEqual(called(right, "min_w"), [0]);
+    assert.equal(called(right, "flex_none"), undefined);
+    assert.equal(right.kids.length, 2);
+    for (const wrapper of right.kids) {
+      assert.deepEqual([called(wrapper, "min_w"), called(wrapper, "flex_shrink")], [[0], [1]]);
+    }
+  }
+});
+
+test("session numbers stay on the left with or without meters, with a divider only between the two", () => {
+  for (const resources of [undefined, bothRead]) {
+    const models = combinedResources(resources);
+    const narrow = narrowestWith(models, () => true);
+    for (const width of [narrow, 600, 3000]) {
+      const fleet = fleetBar(models, width, session, true);
+      if (fleet.labels) continue;
+      const [left, right] = sidesOf(drawBar({ fleet }));
+      assert.match(stub.textOf(left.kids[0]), /ctx 12%/, `width ${width}`);
+      assert.equal(left.kids.filter(isDivider).length, pillsOf(left).length ? 1 : 0, `width ${width}`);
+      assert.equal(right.kids[0].id, "ul-machine-0", `width ${width}`);
+    }
+  }
+  const labelled = fleetBar(combinedResources(bothRead), 420, session, true);
+  assert.ok(labelled.labels);
+  const [left, right] = sidesOf(drawBar({ fleet: labelled }));
+  assert.match(stub.textOf(left), /ctx 12%/);
+  assert.ok(!stub.textOf(right).includes("ctx 12%"));
+  assert.equal(metersOf(labelled).length, 0);
+});
+
+test("Follow Space shows one unlabelled meter, for the focused space's machine", () => {
+  for (const [focused, name, numbers] of [[null, "Local", /CPU 12% RAM 61% Disk 27%/], ["arch", "arch", /CPU 71% RAM 33% Disk 90%/]]) {
+    const pills = metersOf(fleetBar(resourceModels(bothRead, { remotes: [machine("arch")], focused }), 2400, [], true));
+    assert.equal(pills.length, 1);
+    assert.equal(machineLabel(pills[0]), null);
+    assert.ok(!stub.textOf(pills[0]).includes(name), name);
+    assert.match(pillTexts(pills[0]), numbers);
+    assert.ok(called(pills[0], "tooltip")[0].startsWith(`${name} · CPU `), name);
   }
   const other = resourceModels(published(reading("studio", 1, 2, 3)), { focused: "arch" });
-  assert.equal(pillsOf(drawBar({ fleet: fleetBar(other, 2400, [], true) })).length, 0, "another route's reading is not borrowed");
+  assert.equal(metersOf(fleetBar(other, 2400, [], true)).length, 0, "another route's reading is not borrowed");
 });
 
-test("Local + Remote draws one resource pill per machine, each with its own numbers", () => {
-  const tree = drawBar({ fleet: fleetBar(combinedResources(bothRead), 3000, [], true) });
-  assert.deepEqual(pillsOf(tree).map((p) => p.id), ["ul-resources-0", "ul-resources-1"]);
-  for (const [index, numbers] of [[0, /12%.*61%.*27%/], [1, /71%.*33%.*90%/]]) {
-    const [chip, pill, frame] = stub.findById(tree, `ul-machine-${index}`).kids;
-    assert.equal(called(chip, "border"), undefined);
-    assert.equal(pill.id, `ul-resources-${index}`);
-    assert.ok(frame.id.startsWith(`ul-fleet-provider-${index}-`));
-    assert.match(stub.textOf(pill), numbers);
+const namedModels = (localName, label, resources = bothRead) => {
+  const projection = project(linuxHost({ label }));
+  const saved = { mode: "combined", selected: { route: "arch", label }, collapsed: [] };
+  return harness(projection, saved).adapter.model(projection, null, effectivePrefs(),
+    { local: localStates, now: NOW, resources }, chipsFor(localName, "Linux"));
+};
+
+test("with two machines each meter is labelled with its machine's short name", () => {
+  for (const [localName, label, expected] of [
+    ["studio", "arch-box", ["studio", "arch-box"]],
+    [null, "twelve-chars", ["Local", "twelve-chars"]],
+    ["mateos-macbook-pro", "thirteen-char", ["mateos-macb…", "thirteen-ch…"]],
+  ]) {
+    const pills = metersOf(fleetBar(namedModels(localName, label), 3000, [], true));
+    assert.deepEqual(pills.map(machineLabel), expected);
   }
+  const pills = metersOf(fleetBar(namedModels("mateos-macbook-pro", "studio", published(reading(null, 12, null, 27),
+    reading("arch", 1, 2, 3))), 3000, [], true));
+  assert.deepEqual(pills.map((pill) => called(pill, "tooltip")[0]),
+    ["mateos-macbook-pro · CPU 12% · RAM — · Disk 27%", "studio · CPU 1% · RAM 2% · Disk 3%"]);
+  const one = metersOf(fleetBar(namedModels("studio", "arch-box", published(reading("arch", 1, 2, 3))), 3000, [], true));
+  assert.deepEqual(one.map(machineLabel), ["arch-box"], "the other machine having no reading does not make it unambiguous");
 });
 
-test("a lent Antigravity entry and placeholder machines have no resource pill", () => {
+test("a meter's label takes room of its own", () => {
+  const models = namedModels("studio", "arch-box");
+  const renamed = { ...models, groups: models.groups.map((host) => (host.route === null ? { ...host, meterName: "s" } : host)) };
+  const shown = (fleet) => fleet.meters != null;
+  assert.ok(narrowestWith(models, shown) > narrowestWith(renamed, shown));
+});
+
+test("a lent Antigravity entry labels the meter beside it and has none of its own", () => {
   const readings = published(reading(null, 1, 2, 3), reading("arch", 4, 5, 6), reading("studio", 7, 8, 9));
   const borrowed = resourceModels(readings, { remotes: [machine("arch"), machine("studio", liveAgy(MIN))],
     local: noLocalAgy(), focused: "arch" });
   assert.equal(lent(borrowed).lent, true);
-  assert.equal(lent(borrowed).resources, undefined);
-  assert.deepEqual(pillsOf(drawBar({ fleet: fleetBar(borrowed, 2400, [], true) })).map((p) => p.id), ["ul-resources-0"]);
+  const stages = new Set();
+  for (let width = 60; width <= 2400; width += 2) {
+    const fleet = fleetBar(borrowed, width, [], true);
+    const pills = metersOf(fleet);
+    if (!pills.length) continue;
+    stages.add(fleet.groups.length);
+    assert.equal(pills.length, 1, `width ${width}`);
+    assert.match(pillTexts(pills[0]), /4%.*5%.*6%/, `width ${width}`);
+    assert.equal(machineLabel(pills[0]), fleet.groups.length > 1 ? "arch" : null, `width ${width}`);
+  }
+  assert.deepEqual([...stages].sort(), [1, 2], "labelled only while the lent machine is on the bar");
+});
+
+test("placeholder machines have no meter", () => {
+  const readings = published(reading(null, 1, 2, 3), reading("arch", 4, 5, 6), reading("studio", 7, 8, 9));
   const two = [machine("arch"), machine("studio")];
-  for (const [label, remotes, mode, activeMachine, ids] of [
-    ["Choose remote", two, "combined", null, ["ul-resources-0"]],
-    ["No remote available", [linuxHost({ state: "unreachable" })], "combined", null, ["ul-resources-0"]],
+  for (const [label, remotes, mode, activeMachine, labels] of [
+    ["Choose remote", two, "combined", null, ["Local"]],
+    ["No remote available", [linuxHost({ state: "unreachable" })], "combined", null, ["Local"]],
     ["Active machine unknown", two, "follow", undefined, []],
   ]) {
     const projection = project(...remotes);
     const models = harness(projection, { mode, selected: null, collapsed: [] }).adapter
       .model(projection, activeMachine, effectivePrefs(), { local: localStates, now: NOW, resources: readings });
     assert.ok(models.groups.some((host) => host.label === label), label);
-    assert.deepEqual(pillsOf(drawBar({ fleet: fleetBar(models, 2400, [], true) })).map((p) => p.id), ids, label);
+    assert.deepEqual(metersOf(fleetBar(models, 2400, [], true)).map(machineLabel), labels, label);
   }
 });
 
 test("resource bars and numbers turn from ok to warn to hot", () => {
-  const models = resourceModels(published(reading(null, 69, 70, 90)));
+  const models = resourceModels(published(reading(null, 69, 70, 90)), { remotes: [machine("arch")] });
   const tree = drawBar({ fleet: fleetBar(models, 2400, [], true) });
   const colors = stub.findById(tree, "ul-resources-0").kids.map((segmentNode) => {
     const [, track, number] = segmentNode.kids;
@@ -1144,132 +1267,108 @@ test("resource bars and numbers turn from ok to warn to hot", () => {
   assert.deepEqual(colors, [["ansi2", "ansi2", 21], ["ansi3", "ansi3", 21], ["ansi1", "ansi1", 27]]);
 });
 
-test("the resource pill always names its numbers on hover, whatever the provider-name preference", () => {
-  const fleet = fleetBar(resourceModels(published(reading(null, 12, null, 27))), 2400, [], true);
-  for (const nameOnHover of [true, false]) {
-    const pill = stub.findById(drawBar({ fleet, nameOnHover }), "ul-resources-0");
-    assert.equal(called(pill, "tooltip")?.[0], "CPU 12% · RAM — · Disk 27%", `nameOnHover ${nameOnHover}`);
-  }
-});
-
-test("a numbers-only pill shows an unknown metric as a dim dash in its own place", () => {
-  const models = resourceModels(published(reading(null, null, 86, 38)));
-  const widths = Array.from({ length: 1500 }, (_, i) => 3000 - 2 * i);
-  const fleet = widths.map((width) => fleetBar(models, width, [], true)).find((f) => f.resourceDensity === DENSITY.NO_LABELS);
-  const pill = stub.findById(drawBar({ fleet, nameOnHover: false }), "ul-resources-0");
-  assert.deepEqual(pill.kids.map((segmentNode) => [segmentNode.kids.length, stub.textOf(segmentNode),
+test("a numbers-only meter keeps its machine label and shows an unknown metric as a dim dash in its place", () => {
+  const models = combinedResources(published(reading(null, null, 86, 38)));
+  const fleet = fleetBar(models, narrowestWith(models, (f) => f.meters != null), [], true);
+  assert.equal(fleet.meterDensity, DENSITY.NO_LABELS);
+  const [pill] = metersOf(fleet);
+  const [name, ...metrics] = pill.kids;
+  assert.equal(stub.textOf(name), "Local");
+  assert.deepEqual(metrics.map((segmentNode) => [segmentNode.kids.length, stub.textOf(segmentNode),
     called(segmentNode.kids[0], "text_color")[0]]), [[1, "—", "dim"], [1, "86%", "ansi3"], [1, "38%", "ansi2"]]);
-  assert.equal(called(pill, "tooltip")[0], "CPU — · RAM 86% · Disk 38%");
+  assert.equal(called(pill, "tooltip")[0], "Local · CPU — · RAM 86% · Disk 38%");
 });
 
-const hasBar = (node) => stub.findAll(node, (n) => called(n, "h")?.[0] === 4).length > 0;
-const pillStyle = (pill) => `${stub.textOf(pill).includes("CPU") ? "label " : ""}${hasBar(pill) ? "bar " : ""}number`;
-
-test("the resource pill takes its estimated width, then loses its labels, then gives way to the quotas", () => {
+test("a meter steps down with the width: bars, labels, numbers only, then hidden", () => {
   const states = { ...localStates, codex: { installed: false }, "opencode-go": { installed: false } };
   const remote = linuxHost();
   remote.providers = remote.providers.slice(0, 2);
   const models = resourceModels(published(reading(null, 12, 61, 27)), { remotes: [remote], local: states });
-  const without = resourceModels(undefined, { remotes: [remote], local: states });
-  // Beside the one-machine quota bar (237), a pill of 198 with labels and 109 without.
-  const labelled = 237 + 198;
-  const bare = 237 + 109;
-  for (const [width, style] of [[labelled, "label number"], [labelled - 1, "number"], [bare, "number"], [bare - 1, null], [237, null]]) {
-    const fleet = fleetBar(models, width, [], false);
-    assert.equal(fleet.labels, undefined, `width ${width}`);
-    assert.match(barText(fleet), /5h 4%/, `width ${width}`);
-    const pill = stub.findById(drawBar({ fleet }), "ul-resources-0");
-    assert.equal(pill && pillStyle(pill), style ?? undefined, `width ${width}`);
-    if (!style) assert.deepEqual(fleet, fleetBar(without, width, [], false), `width ${width}`);
-  }
-  // The room the pill leaves goes back to the quotas, usage bars included.
-  const regained = fleetBar(models, bare - 1, [], true);
-  assert.equal(regained.density, DENSITY.FULL);
-  assert.deepEqual(regained, fleetBar(without, bare - 1, [], true));
-  const narrowest = fleetBar(models, 236, [], false);
-  assert.deepEqual(narrowest.labels, ["This Computer"]);
-  assert.equal(pillsOf(drawBar({ fleet: narrowest })).length, 0);
-});
-
-const hasQuotaNumbers = (fleet) => !fleet.labels
-  && framesOf(drawBar({ fleet }), "ul-fleet-provider-").some((frame) => /\d%/.test(stub.textOf(frame)));
-function resourceStage(fleet) {
-  if (fleet.labels) return "labels";
-  const pills = pillsOf(drawBar({ fleet }));
-  if (!pills.length) return "no pills";
-  if (fleet.resourceDensity === DENSITY.NO_LABELS) return "pill numbers";
-  if (fleet.density === DENSITY.FULL) return "full";
-  return fleet.groups.some((host) => host.groups.some((g) => g.segments.length > 1)) ? "compact" : "tight";
-}
-
-test("the fleet bar narrows resources through every step, ending at the bar without resources", () => {
-  const models = combinedResources(bothRead);
-  const without = combinedResources(undefined);
-  for (const [showBars, expected] of [[true, ["labels", "no pills", "pill numbers", "tight", "compact", "full"]],
-    [false, ["labels", "no pills", "pill numbers", "tight", "compact"]]]) {
-    const stages = new Set();
-    let allWindowsWithoutPills = false;
-    for (let width = 60; width <= 3000; width += 2) {
-      const fleet = fleetBar(models, width, [], showBars);
-      const stage = resourceStage(fleet);
-      stages.add(stage);
-      const style = { full: "label bar number", compact: "label number", tight: "label number", "pill numbers": "number" }[stage];
-      const pills = pillsOf(drawBar({ fleet }));
-      assert.equal(pills.length, style ? 2 : 0, `width ${width}`);
-      for (const pill of pills) assert.equal(pillStyle(pill), style, `width ${width} ${stage}`);
-      if (stage === "pill numbers") {
-        assert.ok(fleet.groups.every((h) => h.groups.every((g) => g.segments.length <= 1)), `width ${width}`);
-      }
-      if (stage === "no pills") {
-        assert.deepEqual(fleet, fleetBar(without, width, [], showBars), `width ${width}`);
-        allWindowsWithoutPills ||= fleet.groups.some((h) => h.groups.some((g) => g.segments.length > 1));
+  // A meter of 300, 198 or 109 shows from that much beside the one-machine quota bar and the space between
+  // the sides: 237 + 17 without usage bars, and 34 more with them.
+  const narrow = (base) => [[base + 198, "label number"], [base + 197, "number"], [base + 109, "number"], [base + 108, null], [base + 17, null]];
+  for (const [showBars, steps] of [[true, [[588, "label bar number"], [587, "label number"], ...narrow(288)]],
+    [false, [[2400, "label number"], [554, "label number"], ...narrow(254)]]]) {
+    for (const [numbers, extra] of [[[], 0], [session, 77 + 17]]) {
+      for (const [width, style] of steps) {
+        const fleet = fleetBar(models, width + extra, numbers, showBars);
+        const at = `width ${width + extra}, showBars ${showBars}`;
+        assert.equal(fleet.labels, undefined, at);
+        assert.match(barText(fleet), /5h.*4%/, at);
+        assert.deepEqual(metersOf(fleet).map(pillStyle), style ? [style] : [], at);
       }
     }
-    assert.deepEqual([...stages], expected, `showBars ${showBars}`);
-    assert.ok(allWindowsWithoutPills, `showBars ${showBars}`);
   }
 });
 
-test("resources never leave the bar with labels only where it would have shown quota numbers", () => {
+const quotaStage = (fleet) => `${fleet.density} ${fleet.groups.map((h) => h.groups.map((g) => g.segments.length))}`;
+
+test("labelled meters step down together while the quotas stay as they are", () => {
+  const models = combinedResources(bothRead);
+  for (const [showBars, expected] of [[true, ["label bar number", "label number", "number", "none"]],
+    [false, ["label number", "number", "none"]]]) {
+    const widest = quotaStage(fleetBar(models, 3000, [], showBars));
+    const styles = [];
+    for (let width = 3000; width >= 60; width -= 1) {
+      const fleet = fleetBar(models, width, [], showBars);
+      if (fleet.labels) continue;
+      const pills = metersOf(fleet);
+      assert.ok(pills.length === 0 || pills.length === 2, `width ${width}`);
+      assert.equal(new Set(pills.map(pillStyle)).size, pills.length ? 1 : 0, `one level at width ${width}`);
+      if (pills.length) assert.deepEqual(pills.map(machineLabel), ["Local", "mateod-arch"], `width ${width}`);
+      const style = pills.length ? pillStyle(pills[0]) : "none";
+      if (quotaStage(fleet) === widest && styles.at(-1) !== style) styles.push(style);
+    }
+    assert.deepEqual(styles, expected, `showBars ${showBars}`);
+  }
+});
+
+test("readings never change the quota side, at any width", () => {
   const readings = published(reading(null, 100, 100, 100), reading("arch", 100, 100, 100), reading("studio", 100, 100, 100));
   const lending = { remotes: [machine("arch"), machine("studio", liveAgy(MIN))], local: noLocalAgy(), focused: "arch" };
   const costly = { remotes: [machine("arch", datedAgy(DAY)), machine("studio", liveAgy(MIN, 30))],
     local: { claude: localWindow(41), codex: localWindow(52), ...noLocalAgy() } };
-  const session = [{ level: "ok", text: "ctx 12%" }];
-  for (const options of [{}, { focused: "arch" }, { mode: "combined", selected: "arch" }, lending, costly]) {
-    const withResources = resourceModels(readings, options);
+  const unpicked = { remotes: [machine("arch", datedAgy(DAY)), machine("studio", liveAgy(MIN))], local: noLocalAgy(), mode: "combined" };
+  const widths = [...Array.from({ length: 647 }, (_, i) => 60 + 3 * i), Infinity];
+  const rightSide = (fleet) => JSON.stringify(sidesOf(drawBar({ fleet, nameOnHover: true }))[1]);
+  for (const options of [{}, { focused: "arch" }, { mode: "combined", selected: "arch" }, lending, costly, unpicked]) {
+    const withReadings = resourceModels(readings, options);
     const without = resourceModels(undefined, options);
     for (const showBars of [true, false]) {
       for (const numbers of [[], session]) {
-        for (let width = 60; width <= 3000; width += 2) {
+        let metered = 0;
+        for (const width of widths) {
           const plain = fleetBar(without, width, numbers, showBars);
-          const fleet = fleetBar(withResources, width, numbers, showBars);
-          if (hasQuotaNumbers(plain)) assert.ok(hasQuotaNumbers(fleet), `width ${width}`);
-          assert.equal(Boolean(fleet.labels), Boolean(plain.labels), `width ${width}`);
-          if (!pillsOf(drawBar({ fleet })).length) assert.deepEqual(fleet, plain, `width ${width}`);
-          else assert.deepEqual(fleet.groups.map((h) => h.chip), plain.groups.map((h) => h.chip), `width ${width}`);
+          const { meters, meterDensity, ...quota } = fleetBar(withReadings, width, numbers, showBars);
+          assert.deepEqual(quota, plain, `width ${width}`);
+          assert.ok(!("meters" in plain), `width ${width}`);
+          if (!meters) continue;
+          metered += 1;
+          assert.equal(rightSide({ ...quota, meters, meterDensity }), rightSide(plain), `width ${width}`);
         }
+        assert.ok(metered > 0);
       }
     }
   }
 });
 
-test("without a usable reading the fleet bar is exactly as it was", () => {
+test("without a usable reading the fleet bar is drawn exactly as with none", () => {
   const options = { mode: "combined", selected: "arch" };
   const plain = resourceModels(undefined, options);
   const drawn = (fleet) => JSON.stringify(drawBar({ fleet, nameOnHover: true }));
-  for (const record of [null, { ...bothRead, version: 2 }, published(reading("studio", 1, 2, 3)),
+  for (const record of [null, "text", { ...bothRead, version: 2 }, { ...bothRead, machines: {} },
+    published(reading("studio", 1, 2, 3)),
     published(reading(null, 1, 2, 3, NOW - 61), reading("arch", null, null, null))]) {
     const models = resourceModels(record, options);
     for (const showBars of [true, false]) {
-      for (let width = 60; width <= 2400; width += 20) {
-        const fleet = fleetBar(models, width, [], showBars);
-        const before = fleetBar(plain, width, [], showBars);
-        assert.deepEqual(fleet, before, `width ${width}`);
-        assert.ok(!("resourceDensity" in fleet), `width ${width}`);
-        assert.equal(drawn(fleet), drawn(before), `width ${width}`);
+      for (const numbers of [[], session]) {
+        for (let width = 60; width <= 2400; width += 20) {
+          const fleet = fleetBar(models, width, numbers, showBars);
+          const before = fleetBar(plain, width, numbers, showBars);
+          assert.deepEqual(fleet, before, `width ${width}`);
+          assert.equal(drawn(fleet), drawn(before), `width ${width}`);
+        }
       }
     }
   }
-  assert.ok(plain.groups.every((host) => !("resources" in host)));
 });
