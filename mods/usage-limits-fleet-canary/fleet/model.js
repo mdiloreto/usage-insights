@@ -8,8 +8,10 @@ import { THIS_COMPUTER, chipText } from "./identity.js";
 const NO_IDENTITY = { localOs: null, localName: null, remoteOs: () => null };
 // Not a valid route (routes start with a letter or digit), so it can share the collapsed list with them.
 export const LOCAL_COLLAPSE_KEY = "@local";
-// Copilot and Antigravity appear only where the machine reports them; Claude and Codex always do.
+// Optional providers appear only where a remote machine reports them, or where this computer's helper
+// has found them; the others always do.
 const providersFor = (machine) => REMOTE_PROVIDERS.filter((p) => !p.optional || machine.states?.[p.id]);
+const localProviders = (states) => PROVIDERS.filter((p) => !p.optional || states[p.id]?.installed === true);
 const current = (w, now) => Number.isFinite(w.percent) && w.percent >= 0 && w.percent <= 100
   && (w.resetsAt == null || w.resetsAt > now);
 export const isFable = (w) => /^weekly_scoped:fable$/i.test(w.id);
@@ -70,6 +72,35 @@ function remoteStates(machine, now, prefs, providers) {
   }));
 }
 
+const isAgy = (group) => group.providerId === "agy";
+
+// What one machine's Antigravity can offer the bar, or null where it never had a reading. A reading is
+// current when it has something to show, unless the caller judges that apart from what is shown.
+function agyReading(host, state, current) {
+  const group = host.groups.find(isAgy);
+  if (!group) return null;
+  const live = current ?? group.segments.length > 0;
+  if (live) return { host, group, live, observedAt: state.report.observedAt };
+  const times = [state.lastGood, state.historyDetail]
+    .filter((reading) => reading?.windows?.length).map((reading) => reading.observedAt);
+  return times.length ? { host, group, live, observedAt: Math.max(...times) } : null;
+}
+
+// Which machines the bar shows must not hide Antigravity: when none of them has a current reading, the
+// freshest one elsewhere joins under its own machine's chip. A dated one joins only if they hold none at all.
+function withLentAgy(shown, readings) {
+  const onBar = readings.filter(({ host }) => shown.includes(host));
+  if (onBar.some((reading) => reading.live)) return shown;
+  const live = readings.filter((reading) => reading.live && reading.group.segments.length);
+  if (!live.length && onBar.length) return shown;
+  const lenders = live.length ? live : readings.filter((reading) => !reading.live);
+  if (!lenders.length) return shown;
+  const { host: { label, chip }, group } = lenders.reduce((best, next) => (next.observedAt > best.observedAt ? next : best));
+  // No route: only this computer's own segment has the null route that keeps session numbers on the bar.
+  return [...shown.map((host) => ({ ...host, groups: host.groups.filter((g) => !isAgy(g)) })),
+    { label, chip, groups: [group], lent: true }];
+}
+
 export function fleetModels(projection, prefs, selection, localSource, identity = NO_IDENTITY) {
   const { mode, selected, activeRemote, activeMachine, machines, choices } = selection;
   const now = projection.now;
@@ -91,16 +122,22 @@ export function fleetModels(projection, prefs, selection, localSource, identity 
   const localDetails = states.claude && !(localFable && fableEnabled(prefs)) ? { ...states, claude: {
     ...states.claude, report: withoutFable(states.claude.report), lastGood: withoutFable(states.claude.lastGood),
   } } : states;
-  const localGroups = compactGroups(states, PROVIDERS, prefs, localSource.now);
+  const providers = localProviders(states);
+  const localGroups = compactGroups(states, providers, prefs, localSource.now);
   const local = { route: null, label: THIS_COMPUTER, chip: identity.localName ? chipText(identity.localOs, identity.localName) : THIS_COMPUTER, groups: localGroups, summary: tightSummary(localGroups),
     collapsed: collapsed.has(LOCAL_COLLAPSE_KEY),
-    panel: providerDetails(localDetails, PROVIDERS, prefs, localSource.now, false), fable: localFable };
+    panel: providerDetails(localDetails, providers, prefs, localSource.now, false), fable: localFable };
   const remotes = machines.map(forRemote);
   const groupFor = (machine) => remotes.find(({ route }) => route === machine.route) ?? forRemote(machine);
   const groups = mode === "combined"
     ? [local, selected ? groupFor(selected) : { label: choices.length ? "Choose remote" : "No remote available", groups: [] }]
     : [activeRemote ? groupFor(activeRemote) : activeMachine === null ? local : { label: "Active machine unknown", groups: [] }];
-  return { local, remotes, groups, selection };
+  // This computer's is judged on every window, so hiding them does not bring another machine's onto the bar.
+  const currentHere = currentWindows(states.agy, localSource.now).length > 0;
+  const agyReadings = [agyReading(local, states.agy, currentHere),
+    ...remotes.map((host) => agyReading(host, host.machine.states?.agy))];
+  const bar = isShown(prefs, "agy") ? withLentAgy(groups, agyReadings.filter(Boolean)) : groups;
+  return { local, remotes, groups: bar, selection };
 }
 
 const labelWidth = (label) => Math.ceil(7.5 * label.length + 8);
@@ -110,9 +147,19 @@ const HOST_GAP_W = 17;
 const hostWidth = (host, density) => labelWidth(hostChip(host)) + host.groups.reduce((sum, g) =>
   sum + groupWidth(g, density) + (g.mark == null ? 0 : 16), 0);
 
-export function fleetBar(models, width, numbers, showBars) {
-  const { groups } = models;
-  if (!groups.includes(models.local)) numbers = [];
+const showsNumbers = (layout) => layout.groups?.some((host) =>
+  host.groups.some((g) => g.segments.length > 0 || g.spend != null)) === true;
+
+export function fleetBar({ groups }, width, numbers, showBars) {
+  const layout = barLayout(groups, width, numbers, showBars);
+  if (!layout.labels) return layout;
+  // A lent entry never costs the other machines their numbers.
+  const own = barLayout(groups.filter((host) => !host.lent), width, numbers, showBars);
+  return showsNumbers(own) ? own : layout;
+}
+
+function barLayout(groups, width, numbers, showBars) {
+  if (!groups.some((host) => host.route === null)) numbers = [];
   const sessionWidth = sessionNumbersWidth(numbers);
   const room = width - 24 - sessionWidth - 28;
   const fits = (hosts, density) => hosts.reduce((sum, host) => sum + hostWidth(host, density), HOST_GAP_W * (hosts.length - 1)) <= room;
