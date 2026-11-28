@@ -120,8 +120,10 @@ sign-in already on the machine being read.
   `opencode api GET /api/experimental/usage/limits` (an experimental route).
   The local server uses its own OpenCode Console sign-in to ask OpenCode for them,
   and the bar reads no credential. A stopped server or a signed-out Console shows
-  as unavailable, and an OpenCode without that route shows as not installed. The
-  dashboard only shows what a bar has read.
+  as unavailable, and an OpenCode without that route shows as not installed.
+  It also reads, where present, Omarchy's saved Antigravity quota record on this
+  computer, a local file with no sign-in or network call. The dashboard only
+  shows what a bar has read.
 - **Another machine:** its providers are not asked until you install the quota
   helper there (Linux: `sh scripts/install-quota.sh`, then the same with
   `enroll`) and add that grant by hand to a viewer's enrollment file:
