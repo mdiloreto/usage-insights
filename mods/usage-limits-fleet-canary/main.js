@@ -12,6 +12,7 @@ import { statusBar } from "./ui/bar.js";
 import { limitsPanel } from "./ui/panel.js";
 import { settingsPanel } from "./ui/settings.js";
 import { fleetBar } from "./fleet/model.js";
+import { RESOURCES_KEY } from "./fleet/resources.js";
 import { focusScope } from "./fleet/selection.js";
 import { createIdentity } from "./fleet/identity.js";
 import { fleetAdapter, refreshOutcome, sharedFleetPrefs } from "./fleet/adapter.js";
@@ -213,7 +214,8 @@ export default class UsageLimits extends View {
     this.remoteOutcome = refreshOutcome(projection, this.remoteOutcome);
     const now = nowS();
     const st = states();
-    const combined = this.fleet?.model(projection, scope?.activeMachine, prefs, { local: st, now }, this.identity?.snapshot()) ?? null;
+    const combined = this.fleet?.model(projection, scope?.activeMachine, prefs,
+      { local: st, now, resources: shared(RESOURCES_KEY) }, this.identity?.snapshot()) ?? null;
     const numbers = sessionOnBar(this.session?.data, prefs);
     const common = { border: props()?.border, onResize: this.act.resize, onHover: this.act.hover };
     if (combined) {

@@ -1,6 +1,10 @@
 // Recording stand-ins for the gpui modules, so the canary's UI code can be rendered under node:test.
 const wrap = (type, id) => {
-  const node = { type, id, calls: [], kids: [], texts: [], handlers: {} };
+  const node = { type, id, calls: [], kids: [], texts: [], handlers: {}, consumed: false };
+  // As in the runtime, an element used as a child or in a slot is consumed, and using it again throws.
+  const usable = (use) => {
+    if (node.consumed) throw new Error(`${node.type} ${node.id ?? ""} used after it was attached: ${use}`);
+  };
   const methods = {
     id(value) { node.id = value; return element; },
     child(value) { return take(value); },
@@ -8,19 +12,30 @@ const wrap = (type, id) => {
     when(condition, branch) { if (condition) branch(element); return element; },
   };
   const take = (value) => {
-    if (value?.__node) node.kids.push(value.__node);
+    if (value?.__node) attach(value);
     else if (value != null) node.texts.push(String(value));
     return element;
+  };
+  const attach = (kid) => {
+    kid.__consume();
+    node.kids.push(kid.__node);
+  };
+  const consume = () => {
+    usable("attached twice");
+    node.consumed = true;
   };
   const element = new Proxy({}, {
     get(_target, property) {
       if (property === "__node") return node;
-      if (typeof property === "symbol") return undefined;
-      if (property in methods) return methods[property];
+      if (property === "__consume") return consume;
+      // JSON.stringify looks this up on an element held in a call's arguments; it is not a builder call.
+      if (typeof property === "symbol" || property === "toJSON") return undefined;
       return (...args) => {
+        usable(property);
+        if (Object.hasOwn(methods, property)) return methods[property](...args);
         node.calls.push([property, args]);
         if (/^on_|^hover$/.test(property)) node.handlers[property] = args.at(-1);
-        for (const arg of args) if (arg?.__node) node.kids.push(arg.__node);
+        for (const arg of args) if (arg?.__node) attach(arg);
         return element;
       };
     },
