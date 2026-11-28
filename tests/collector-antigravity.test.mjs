@@ -25,8 +25,8 @@ function num(n, value) { return Buffer.concat([vi(n * 8), vi(value)]); }
 function msg(n, value) { const b = typeof value === "string" ? Buffer.from(value) : value; return Buffer.concat([vi(n * 8 + 2), vi(b.length), b]); }
 const join = (...values) => Buffer.concat(values);
 const ts = (seconds) => join(num(1, seconds), num(2, 123000000));
-function generation({ id = "response-one", model = "gemini-test", step = 1, input = 10, system = 3, output = 7, thinking = 2, cache = 20 } = {}) {
-  const usage = join(num(1, system), num(2, input), num(3, output), num(5, cache), num(9, output - thinking), num(10, thinking), msg(11, id));
+function generation({ id = "response-one", model = "gemini-test", step = 1, modelId = 1016, input = 10, output = 7, thinking = 2, cache = 20 } = {}) {
+  const usage = join(modelId === null ? Buffer.alloc(0) : num(1, modelId), num(2, input), num(3, output), num(5, cache), num(9, thinking), num(10, output - thinking), msg(11, id));
   return { usage, data: join(msg(2, vi(step)), msg(1, join(msg(4, usage), msg(19, model))), msg(8, "PRIVATE_PROMPT_AND_THINKING")) };
 }
 async function env(t) {
@@ -40,13 +40,20 @@ async function env(t) {
 function database(context, name = "conv", records = [{ idx: 0, ...generation() }]) {
   const file = path.join(context.home, "conversations", `${name}.db`);
   const db = new DatabaseSync(file);
-  db.exec("CREATE TABLE gen_metadata(idx INTEGER PRIMARY KEY, data BLOB); CREATE TABLE steps(idx INTEGER PRIMARY KEY, metadata BLOB); CREATE TABLE trajectory_metadata_blob(id TEXT PRIMARY KEY, data BLOB)");
+  db.exec("CREATE TABLE gen_metadata(idx INTEGER PRIMARY KEY, data BLOB); CREATE TABLE steps(idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB); CREATE TABLE trajectory_metadata_blob(id TEXT PRIMARY KEY, data BLOB)");
   db.prepare("INSERT INTO trajectory_metadata_blob VALUES ('main', ?)").run(join(msg(1, msg(1, "file:///workspace/test")), msg(2, ts(1790400000))));
   for (const r of records) {
     db.prepare("INSERT INTO gen_metadata VALUES (?, ?)").run(r.idx, r.data);
-    if (r.usage) db.prepare("INSERT OR IGNORE INTO steps VALUES (?, ?)").run(r.step ?? 1, join(msg(1, ts(r.seconds ?? 1790486400)), msg(9, r.usage)));
+    if (r.usage) db.prepare("INSERT OR IGNORE INTO steps (idx, metadata) VALUES (?, ?)").run(r.step ?? 1, join(msg(1, ts(r.seconds ?? 1790486400)), msg(9, r.usage)));
   }
   return { db, file };
+}
+function addStep(db, idx, { type = 15, seconds = 1790486400, usage, summary } = {}) {
+  db.prepare("INSERT INTO steps VALUES (?, ?, ?)").run(idx, type, join(
+    seconds === null ? Buffer.alloc(0) : msg(1, ts(seconds)),
+    usage ? msg(9, usage) : Buffer.alloc(0),
+    summary ? msg(28, msg(2, summary)) : Buffer.alloc(0),
+  ));
 }
 async function transcript(context, name = "conv") {
   const file = path.join(context.home, "brain", name, ".system_generated/logs/transcript.jsonl");
@@ -66,15 +73,15 @@ test("Antigravity decodes the independently encoded protobuf wire vector", async
   const hex = await readFile(new URL("./fixtures/antigravity-generation.hex", import.meta.url), "utf8");
   assert.deepEqual(decodeAntigravityGeneration(Buffer.from(hex.trim(), "hex")), [{
     step: null, model: "gemini-3-flash-a", responseId: "resp-1",
-    tokens: { input: 1632, output: 340, cacheRead: 16000, cacheWrite: 0, reasoning: 40 },
+    tokens: { input: 500, output: 340, cacheRead: 16000, cacheWrite: 0, reasoning: 300 },
   }]);
 });
 
 test("Antigravity protobuf decoder validates accounting, bounds and uint64", () => {
   const [g] = decodeAntigravityGeneration(generation().data);
   assert.equal(g.model, "gemini-test"); assert.equal(g.responseId, "response-one");
-  assert.deepEqual(decodeAntigravityGeneration(generation({ input: 0, output: 0, thinking: 0, cache: 0 }).data), [], "prefilled system-only metadata is not billable usage");
-  assert.deepEqual(g.tokens, { input: 13, output: 7, cacheRead: 20, cacheWrite: 0, reasoning: 2 });
+  assert.deepEqual(decodeAntigravityGeneration(generation({ input: 0, output: 0, thinking: 0, cache: 0 }).data), [], "metadata naming only a model is not billable usage");
+  assert.deepEqual(g.tokens, { input: 10, output: 7, cacheRead: 20, cacheWrite: 0, reasoning: 2 }, "the model id is not input and #9 is reasoning");
   assert.throws(() => protobufFields(Buffer.from([0])), /tag/);
   assert.throws(() => protobufFields(Buffer.from([10, 255])), /varint/);
   assert.throws(() => protobufFields(Buffer.from([10, 5, 0])), /length/);
@@ -94,12 +101,12 @@ test("Antigravity SQLite: model attribution, token accounting, step day, read-on
   const row = first.rows[0];
   assert.equal(row.model, "gemini-test"); assert.equal(row.provider, "google");
   assert.equal(row.project, "/workspace/test"); assert.equal(row.day, "2026-09-27");
-  assert.deepEqual(row.tokens, { input: 13, output: 7, cacheRead: 20, cacheWrite: 0, reasoning: 2, total: 40 });
+  assert.deepEqual(row.tokens, { input: 10, output: 7, cacheRead: 20, cacheWrite: 0, reasoning: 2, total: 37 });
   assert.equal(row.messages, 1); assert.equal(row.session, "antigravity:conv");
   assert.equal(first.warnings.length, 0); assert.equal(await digest(), before);
   assert.equal((await readFile(context.store, "utf8")).includes("PRIVATE_"), false);
   const warm = await run(context);
-  assert.equal(warm.stats.filesRead, 0); assert.equal(warm.stats.unchangedFiles, 1); assert.equal(total(warm), 40);
+  assert.equal(warm.stats.filesRead, 0); assert.equal(warm.stats.unchangedFiles, 1); assert.equal(total(warm), 37);
 });
 
 test("Antigravity SQLite supersedes a cached transcript without duplicate totals", async (t) => {
@@ -107,11 +114,11 @@ test("Antigravity SQLite supersedes a cached transcript without duplicate totals
   assert.equal(total(await run(context, true)), 1004);
   const { db } = database(context); db.close();
   const next = await run(context);
-  assert.equal(total(next), 40); assert.equal(next.rows.length, 1);
+  assert.equal(total(next), 37); assert.equal(next.rows.length, 1);
   const persisted = JSON.parse(await readFile(context.store, "utf8"));
   assert.equal(Object.values(persisted.files).filter((f) => f.adapter === "antigravity").length, 1);
   assert.equal(Object.values(persisted.files)[0].path.endsWith(".db"), true);
-  assert.equal(total(await run(context)), 40);
+  assert.equal(total(await run(context)), 37);
 });
 
 test("Antigravity database handoff replaces token maxima and attribution, but rolls back an unusable replacement", async (t) => {
@@ -125,21 +132,21 @@ test("Antigravity database handoff replaces token maxima and attribution, but ro
   ]);
   replacement.db.close();
   const first = await run(context, true);
-  assert.equal(total(first), 40);
+  assert.equal(total(first), 37);
   const before = JSON.parse(await readFile(context.store, "utf8"));
   await rm(original.file);
 
   const failed = await run(context);
-  assert.equal(total(failed), 40);
+  assert.equal(total(failed), 37);
   const retained = JSON.parse(await readFile(context.store, "utf8"));
   assert.deepEqual(retained.files, before.files);
   assert.deepEqual(retained.dedup, before.dedup);
   assert.equal(retained.nextFileId, before.nextFileId);
 
-  const g = generation({ model: "claude-new", system: 0, input: 10, output: 0, thinking: 0, cache: 0 });
+  const g = generation({ model: "claude-new", input: 10, output: 0, thinking: 0, cache: 0 });
   const db = new DatabaseSync(replacement.file);
   db.prepare("UPDATE gen_metadata SET data = ?").run(g.data);
-  db.prepare("INSERT INTO steps VALUES (1, ?)").run(join(msg(1, ts(1790572800)), msg(9, g.usage)));
+  db.prepare("INSERT INTO steps (idx, metadata) VALUES (1, ?)").run(join(msg(1, ts(1790572800)), msg(9, g.usage)));
   db.close();
   const next = await run(context);
   assert.equal(next.rows.length, 1);
@@ -230,12 +237,12 @@ test("Antigravity accepts genuinely empty and system-only databases", async (t) 
 test("Antigravity SQLite handles WAL append and response-ID dedup across sessions and copied roots", async (t) => {
   const context = await env(t); const { db, file } = database(context);
   db.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0");
-  assert.equal(total(await run(context, true)), 40);
+  assert.equal(total(await run(context, true)), 37);
   const g = generation({ id: "two", model: "claude-test", step: 3 });
   db.prepare("INSERT INTO gen_metadata VALUES (1, ?)").run(g.data);
-  db.prepare("INSERT INTO steps VALUES (3, ?)").run(join(msg(1, ts(1790486401)), msg(9, g.usage)));
+  db.prepare("INSERT INTO steps (idx, metadata) VALUES (3, ?)").run(join(msg(1, ts(1790486401)), msg(9, g.usage)));
   const next = await run(context);
-  assert.equal(total(next), 80); assert.equal(next.rows.find((r) => r.model === "claude-test").provider, "anthropic");
+  assert.equal(total(next), 74); assert.equal(next.rows.find((r) => r.model === "claude-test").provider, "anthropic");
   db.close();
   const other = database(context, "copy"); other.db.close(); // same response ID
   const copiedRoot = path.join(context.home, "second/conversations");
@@ -243,7 +250,7 @@ test("Antigravity SQLite handles WAL append and response-ID dedup across session
   await writeFile(path.join(copiedRoot, "conv.db"), await readFile(file));
   context.sources[0].roots.push("~/second/conversations");
   const copy = await run(context, true);
-  assert.equal(total(copy), 80);
+  assert.equal(total(copy), 74);
 });
 
 test("Antigravity warns for malformed/oversized blobs and missing IDs/times, replays cached warnings", async (t) => {
@@ -255,7 +262,7 @@ test("Antigravity warns for malformed/oversized blobs and missing IDs/times, rep
     { idx: 2, data: Buffer.alloc(16 * 1024 * 1024 + 1) },
   ]); db.close();
   const first = await run(context, true);
-  assert.equal(total(first), 40); assert.equal(first.rows[0].model, "unknown");
+  assert.equal(total(first), 37); assert.equal(first.rows[0].model, "unknown");
   assert.equal(first.rows[0].day, "2026-09-26"); // session-created, not mismatched step
   assert.match(first.warnings.join(" "), /malformed/);
   assert.match(first.warnings.join(" "), /16 MiB/);
@@ -267,9 +274,9 @@ test("Antigravity warns for malformed/oversized blobs and missing IDs/times, rep
 test("Antigravity preserves accepted history on corrupt DB, excludes duplicate transcript, restores fallback after DB removal", async (t) => {
   const context = await env(t); await transcript(context);
   const { db, file } = database(context); db.close();
-  assert.equal(total(await run(context, true)), 40);
+  assert.equal(total(await run(context, true)), 37);
   await writeFile(file, "not sqlite PRIVATE_DATABASE_CONTENT");
-  const failed = await run(context); assert.equal(total(failed), 40);
+  const failed = await run(context); assert.equal(total(failed), 37);
   assert.match(failed.warnings.join(" "), /previous accepted data retained/);
   assert.equal(JSON.stringify(failed).includes("PRIVATE_DATABASE_CONTENT"), false);
   await rm(file);
@@ -286,17 +293,147 @@ test("Antigravity retains accepted SQLite history until its transcript fallback 
   const fallback = await transcript(context);
   const { db, file } = database(context);
   db.close();
-  assert.equal(total(await run(context, true)), 40);
+  assert.equal(total(await run(context, true)), 37);
   await rm(file);
   await chmod(fallback, 0o000);
   try {
     const failed = await run(context);
-    assert.equal(total(failed), 40);
+    assert.equal(total(failed), 37);
     assert.match(failed.warnings.join(" "), /scan failed/);
   } finally {
     await chmod(fallback, 0o600);
   }
   assert.equal(total(await run(context)), 1004);
+});
+
+test("Antigravity counts a response recorded only on a step, with the model id resolved and the step day", async (t) => {
+  const context = await env(t); const { db } = database(context);
+  addStep(db, 2, { seconds: 1790572800, usage: generation({ id: "step-only", model: "", input: 100 }).usage });
+  db.close();
+  const first = await run(context, true);
+  assert.equal(first.rows.length, 2);
+  const row = first.rows.find((r) => r.day === "2026-09-28");
+  assert.equal(row.model, "gemini-test"); assert.equal(row.provider, "google"); assert.equal(row.messages, 1);
+  assert.deepEqual(row.tokens, { input: 100, output: 7, cacheRead: 20, cacheWrite: 0, reasoning: 2, total: 127 });
+  assert.equal(total(first), 164);
+});
+
+test("Antigravity counts each checkpoint response once and prefers the usage naming its model", async (t) => {
+  const context = await env(t); const { db } = database(context);
+  const usage = (id, input, modelId) => generation({ id, input, modelId }).usage;
+  addStep(db, 2, { type: 23, usage: usage("both", 100), summary: usage("both", 100, null) });
+  addStep(db, 3, { type: 23, summary: usage("summary-only", 200, null) });
+  addStep(db, 4, { type: 15, summary: usage("not-a-checkpoint", 400, null) });
+  addStep(db, 5, { type: 23, summary: usage("named-later", 800, null) });
+  addStep(db, 6, { usage: usage("named-later", 800) });
+  addStep(db, 7, { usage: usage("both", 100) });
+  db.close();
+  const first = await run(context, true);
+  assert.deepEqual(
+    first.rows.map((r) => [r.model, r.messages, r.tokens.input]).sort(),
+    [["gemini-test", 3, 910], ["unknown", 1, 200]],
+  );
+  assert.equal(first.warnings.length, 0);
+});
+
+test("Antigravity counts a response once when generation metadata and steps both record it", async (t) => {
+  const context = await env(t); const { db } = database(context);
+  const larger = generation({ input: 50 }).usage;
+  addStep(db, 2, { type: 23, usage: larger, summary: larger });
+  db.close();
+  const first = await run(context, true);
+  assert.equal(first.rows.length, 1); assert.equal(first.rows[0].messages, 1);
+  assert.equal(first.rows[0].tokens.input, 10); assert.equal(total(first), 37);
+});
+
+test("Antigravity skips unusable step usage and dates a step without a timestamp from the session", async (t) => {
+  const context = await env(t); const { db } = database(context);
+  addStep(db, 2, { usage: generation({ id: "", input: 100 }).usage });
+  addStep(db, 3, { usage: generation({ id: "empty", input: 0, output: 0, thinking: 0, cache: 0 }).usage });
+  addStep(db, 4, { usage: join(num(3, 10), num(9, 11), msg(11, "inconsistent")) });
+  db.prepare("INSERT INTO steps VALUES (5, 15, ?)").run(Buffer.alloc(16 * 1024 * 1024 + 1));
+  db.prepare("INSERT INTO steps VALUES (6, 15, NULL)").run();
+  addStep(db, 7, { seconds: null, usage: generation({ id: "undated", modelId: 7, input: 100 }).usage });
+  db.close();
+  const first = await run(context, true);
+  assert.equal(total(first), 164);
+  const row = first.rows.find((r) => r.day === "2026-09-26");
+  assert.equal(row.model, "unknown"); assert.equal(row.messages, 1);
+  assert.match(first.warnings.join(" "), /1 malformed/);
+  assert.match(first.warnings.join(" "), /1 blobs exceed/);
+  assert.match(first.warnings.join(" "), /1 generations use session time/);
+});
+
+test("Antigravity counts once a step whose generation record has no response ID", async (t) => {
+  const context = await env(t);
+  const { db } = database(context, "conv", [{ idx: 0, data: generation({ id: "" }).data }]);
+  addStep(db, 1, { type: 23, usage: generation().usage, summary: generation().usage });
+  db.close();
+  const first = await run(context, true);
+  assert.deepEqual(first.rows.map((r) => [r.messages, r.tokens.total]), [[1, 37]]);
+});
+
+test("Antigravity retains step-only history when its step becomes unreadable", async (t) => {
+  const context = await env(t); const { db, file } = database(context, "conv", []);
+  addStep(db, 1, { usage: generation().usage });
+  db.close();
+  const first = await run(context, true);
+  assert.equal(total(first), 37);
+  const before = JSON.parse(await readFile(context.store, "utf8"));
+  for (const bad of [Buffer.from([10, 255]), Buffer.alloc(16 * 1024 * 1024 + 1)]) {
+    const changed = new DatabaseSync(file);
+    changed.prepare("UPDATE steps SET metadata = ?").run(bad);
+    changed.close();
+    const failed = await run(context);
+    assert.deepEqual(failed.rows, first.rows);
+    assert.match(failed.warnings.join(" "), /previous accepted data retained/);
+    const retained = JSON.parse(await readFile(context.store, "utf8"));
+    assert.deepEqual(retained.files, before.files);
+    assert.deepEqual(retained.dedup, before.dedup);
+  }
+});
+
+test("Antigravity counts the readable usage on a step whose other payload is malformed", async (t) => {
+  const context = await env(t); const { db } = database(context, "conv", []);
+  const bad = Buffer.from([10, 255]);
+  const usage = (id, input) => generation({ id, input }).usage;
+  addStep(db, 1, { type: 23, usage: usage("bad-summary-usage", 100), summary: bad });
+  db.prepare("INSERT INTO steps VALUES (2, 23, ?)").run(join(msg(1, ts(1790486400)), msg(9, usage("bad-summary", 200)), msg(28, bad)));
+  addStep(db, 3, { type: 23, usage: bad, summary: usage("bad-direct", 400) });
+  db.close();
+  const first = await run(context, true);
+  assert.deepEqual(first.rows.map((r) => [r.messages, r.tokens.input]), [[3, 700]]);
+  assert.match(first.warnings.join(" "), /3 malformed/);
+});
+
+test("Antigravity rolls back a database scan that expires during the step pass", async (t) => {
+  const context = await env(t); const { db, file } = database(context); db.close();
+  const store = emptyStore();
+  const before = JSON.stringify(store);
+  const result = await scanAntigravityDb(store, { id: "agy", adapter: "antigravity" }, file,
+    { warn() {}, note() {} }, { filesRead: 0, bytesRead: 0, unchangedFiles: 0 }, { deadline: 1, now: () => 2 });
+  assert.deepEqual(result, { dirty: false, aborted: true, reason: "budget" });
+  assert.equal(JSON.stringify(store), before);
+});
+
+test("Antigravity re-reads a database indexed by the previous accounting without changing it", async (t) => {
+  const context = await env(t); const { db, file } = database(context); db.close();
+  const digest = async () => createHash("sha256").update(await readFile(file)).digest("hex");
+  const first = await run(context, true);
+  const before = await digest();
+  const stale = JSON.parse(await readFile(context.store, "utf8"));
+  const [entry] = Object.values(stale.files);
+  const [usage] = Object.values(stale.dedup);
+  // Version 2 added the model id to input and reported response text as reasoning.
+  entry.state.agyDbVersion = 2;
+  entry.rows[0].input = usage[2] = 1026;
+  entry.rows[0].reasoning = usage[6] = 5;
+  await writeFile(context.store, JSON.stringify(stale));
+  const next = await run(context);
+  assert.equal(next.stats.filesRead, 1);
+  assert.deepEqual(next.rows, first.rows);
+  assert.equal(next.rows[0].tokens.input, 10); assert.equal(next.rows[0].tokens.reasoning, 2);
+  assert.equal(await digest(), before);
 });
 
 for (const interruption of ["deadline", "read error"]) {
@@ -332,7 +469,7 @@ for (const interruption of ["deadline", "read error"]) {
     }
     try {
       const interrupted = await scanSources(store, options);
-      assert.equal(total({ rows: snapshotRows(store) }), 40, "an unfinished fallback must not add a second copy of usage");
+      assert.equal(total({ rows: snapshotRows(store) }), 37, "an unfinished fallback must not add a second copy of usage");
       assert.equal(JSON.stringify(store), before, "rows, dedup ownership and file state must roll back together");
       if (interruption === "deadline") {
         assert.equal(interrupted.complete, false);
@@ -391,7 +528,7 @@ test("Antigravity keeps the SQLite statement alive when GC runs during iteration
       process.argv[1], { warn: (w) => warnings.push(w), note() {} },
       { filesRead: 0, bytesRead: 0, unchangedFiles: 0 }, { onStreamProgress: () => globalThis.gc() });
     assert.equal(result.dirty, true, warnings.join(" "));
-    assert.equal(snapshotRows(store)[0].tokens.total, 40);
+    assert.equal(snapshotRows(store)[0].tokens.total, 37);
     assert.equal(snapshotRows(store)[0].messages, 1);
   `;
   await promisify(execFile)(process.execPath, ["--expose-gc", "--input-type=module", "-e", script, file]);
@@ -456,7 +593,7 @@ for (const interruption of ["SIGTERM", "generation fence"]) {
       await waitFor(async () => (await readWorkerClaim(context.store)) === null);
       const completed = JSON.parse(await readFile(context.store, "utf8"));
       assert.equal(completed.scan.status, "complete");
-      assert.equal(total({ rows: snapshotRows(completed) }), 81);
+      assert.equal(total({ rows: snapshotRows(completed) }), 75);
       assert.equal(snapshotRows(completed).reduce((n, row) => n + row.messages, 0), 2);
     } finally {
       if (worker?.pid && isProcessAlive(worker.pid)) {
